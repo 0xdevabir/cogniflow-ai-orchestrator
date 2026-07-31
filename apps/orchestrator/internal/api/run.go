@@ -6,8 +6,11 @@ import (
 	"net/http"
 	"sync"
 
+	"github.com/cogniflow/orchestrator/internal/budget"
 	"github.com/cogniflow/orchestrator/internal/dag"
 	"github.com/cogniflow/orchestrator/internal/decomposer"
+	"github.com/cogniflow/orchestrator/internal/eval"
+	"github.com/cogniflow/orchestrator/internal/fusion"
 	"github.com/cogniflow/orchestrator/internal/providers"
 )
 
@@ -26,6 +29,20 @@ type runRequest struct {
 	ExecutorMode string `json:"executor_mode,omitempty"`
 	// Parallelism overrides the executor's default (4).
 	Parallelism int `json:"parallelism,omitempty"`
+	// FusionMode selects the fusion strategy: "auto" | "heuristic" | "model".
+	// Default is "auto" (heuristic for ≤1 stream, model otherwise).
+	FusionMode string `json:"fusion_mode,omitempty"`
+	// WorkspaceID scopes the run to a RAG workspace. Optional; defaults to
+	// "default" on the server. Phase 6 wires this into the executor so
+	// nodes with NeedsRAG=true retrieve from the right workspace.
+	WorkspaceID string `json:"workspace,omitempty"`
+	// Budget is the per-run cost + carbon cap. If supplied and the projected
+	// total exceeds the cap, the executor cascade-downgrades models before
+	// running. Phase 7.
+	Budget *budget.Budget `json:"budget,omitempty"`
+	// Eval controls whether a faithfulness judge runs after the run. Default
+	// is true (the orchestrator is built for it). Phase 7.
+	Eval *bool `json:"eval,omitempty"`
 }
 
 // HandleRun is the SSE endpoint that executes a Plan (or a prompt) in
@@ -124,6 +141,37 @@ func (s *Server) HandleRun(w http.ResponseWriter, r *http.Request) {
 	executor := dag.New(plan, s.Router, reg, &runSink{w: w, flusher: flusher})
 	if req.Parallelism > 0 {
 		executor.Parallelism = req.Parallelism
+	}
+	// Phase 5: wire the fuser. The fuser merges upstream streams after the
+	// DAG completes, emits a "fusion" stream, and a "manifest" event.
+	mode := fusion.ModeAuto
+	if req.FusionMode != "" {
+		mode = fusion.Mode(req.FusionMode)
+	}
+	executor.Fuser = fusion.New(fusion.Config{Mode: mode}, reg)
+	// Phase 6: give the executor access to RAG retrieval. Nodes whose plan
+	// annotation has needs_rag=true will call this service before streaming.
+	executor.RAG = s.RAG
+	executor.WorkspaceID = req.WorkspaceID
+	if executor.WorkspaceID == "" {
+		executor.WorkspaceID = "default"
+	}
+	// Phase 7: budget cascade. Estimator projects cost + carbon per node
+	// using the same CostTable the router uses.
+	if s.CostTable != nil {
+		executor.Estimator = budget.New(s.CostTable, 500, 1000)
+	}
+	if req.Budget != nil {
+		executor.Budget = *req.Budget
+	}
+	// Phase 7: faithfulness judge. Eval is on by default; disabled by the
+	// client via {"eval": false}.
+	runEval := true
+	if req.Eval != nil {
+		runEval = *req.Eval
+	}
+	if runEval {
+		executor.Judge = eval.New(s.Registry, s.CostTable, "openai:gpt-4o-mini")
 	}
 
 	// Use a child context we can cancel cleanly if the client disconnects.

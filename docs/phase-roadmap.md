@@ -52,20 +52,29 @@
 - **Build spec:** [`build-specs/phase-4-dag-executor.md`](build-specs/phase-4-dag-executor.md)
 
 ## Phase 5 — Fusion Engine + Citations  *(1½ days)*
-- [ ] Incremental stream merger
-- [ ] Immutable `CitationManifest`
-- [ ] SSE `manifest` event
-- [ ] `FusionViewer` with `[1]` citations + hover cards
-- [ ] Disagreement side-by-side panel
-- **Demo:** Conflicting facts surface both verdicts with citations.
+- [x] Incremental stream merger (heuristic + model-driven modes)
+- [x] Immutable `CitationManifest` (`v: "citation.v1"`, `Span{ID,SubTaskID,Model,Text,DocID,DocSnippet,PromptHash}`)
+- [x] SSE `manifest` event + `fusion_start` + `fusion` chunk stream
+- [x] Judge LLM for disagreement detection (JSON verdict + winners[])
+- [x] `FusionViewer` with `[1]` citations + hover cards (model/node/prompt_hash/doc)
+- [x] Disagreement side-by-side panel (`DisagreementCard`)
+- [x] `FusionRunner` wires the SSE fusion stream into the playground UI
+- [x] DAG executor invokes `Fuser` after all upstream nodes finish
+- **Demo:** Conflicting facts surface both verdicts with citations; live SSE end-to-end with `fusion_start → fusion chunks → manifest → done` verified via `curl`.
 - **Build spec:** [`build-specs/phase-5-fusion-citations.md`](build-specs/phase-5-fusion-citations.md)
 
 ## Phase 6 — RAG + Memory (pgvector)  *(1½ days)*
-- [ ] Upload → chunk → embed → pgvector
-- [ ] Per-node `needs_rag` retrieval + injection
-- [ ] `EntityStore` interface stub (Neo4j later)
-- [ ] Upload UI
-- **Demo:** Upload a PDF, ask about a clause, get cited answer.
+- [x] Chunker (sentence-aware, 800/200 overlap) + lexical cosine fallback
+- [x] `rag.Service` upload + `BuildInjectedSystemPrompt` (top-k=6 with `===DOC n | doc_id | "title"===` blocks)
+- [x] OpenAI `text-embedding-3-small` embedder (1536 dims, batched)
+- [x] `MemStore` for dev/test + pgvector SQL migration embedded (`migrations/0001_init.sql`); PgStore lands in Phase 8 alongside the pgx dep
+- [x] `EntityStore` interface + `NoopStore` stub for Neo4j swap-in (Phase 8)
+- [x] DAG executor injects retrieval into `NeedsRAG` nodes, stamps every emitted `chunk` with `cite[]` carrying `doc_id`/`char_start`/`char_end`
+- [x] Citation manifest gains one span per retrieved doc so hover-cards can show source + char range
+- [x] API: `POST /v1/docs` (multipart + JSON), `GET /v1/docs`, `DELETE /v1/docs/{id}`
+- [x] `DocUploader` (drag-drop) + `DocList` (refresh + delete) wired into `/playground`
+- [x] End-to-end smoke verified: doc uploaded → 8 chunks → run with `needs_rag=true` → chunks carry `cite[]` with the doc id + ranges
+- **Demo:** Upload a doc, ask about a clause, every chunk in the SSE stream carries `cite[].doc_id` + char range; FusionViewer hover-card renders the doc snippet.
 - **Build spec:** [`build-specs/phase-6-rag.md`](build-specs/phase-6-rag.md)
 
 ## Phase 7 — Eval + Cost/Carbon Budget  *(1 day)*

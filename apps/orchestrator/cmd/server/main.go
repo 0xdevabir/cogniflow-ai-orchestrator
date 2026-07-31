@@ -18,7 +18,9 @@ import (
 
 	"github.com/cogniflow/orchestrator/internal/api"
 	"github.com/cogniflow/orchestrator/internal/decomposer"
+	"github.com/cogniflow/orchestrator/internal/entity"
 	"github.com/cogniflow/orchestrator/internal/providers"
+	"github.com/cogniflow/orchestrator/internal/rag"
 	"github.com/cogniflow/orchestrator/internal/router"
 )
 
@@ -88,16 +90,40 @@ func main() {
 	}
 
 	srv := &api.Server{
-		Registry:   reg,
-		Decomposer: decomp,
-		Router:     rtr,
+		Registry:    reg,
+		Decomposer:  decomp,
+		Router:      rtr,
+		EntityStore: entity.NoopStore{},
 	}
+
+	// Phase 7: load the cost table so the budget cascade + eval can price runs.
+	if costs, err := router.LoadCostTable(); err == nil {
+		srv.CostTable = costs
+	} else {
+		log.Printf("budget: failed to load cost table: %v (cascade disabled)", err)
+	}
+
+	// Build the RAG service. The default store is the in-memory store so
+	// the demo works without Postgres; ORCH_DATABASE_URL switches to pgvector
+	// in Phase 8. The OpenAI embedder requires OPENAI_API_KEY; without it we
+	// fall back to a lexical-only retriever (good enough for the playground).
+	var ragSvc *rag.Service
+	if openaiKey := os.Getenv("OPENAI_API_KEY"); openaiKey != "" {
+		emb := rag.NewOpenAIEmbedder(openaiKey, "text-embedding-3-small")
+		ragSvc = rag.NewService(rag.NewMemStore(), emb)
+	} else {
+		log.Printf("rag: OPENAI_API_KEY not set → using lexical-only retriever")
+		ragSvc = rag.NewService(rag.NewMemStore(), nil)
+	}
+	srv.RAG = ragSvc
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", srv.HandleHealthz)
 	mux.HandleFunc("/v1/chat", srv.HandleChat)
 	mux.HandleFunc("/v1/plan", srv.HandlePlan)
 	mux.HandleFunc("/v1/run", srv.HandleRun)
+	mux.HandleFunc("/v1/docs", srv.HandleDocsRoute)
+	mux.HandleFunc("/v1/docs/", srv.HandleDocsRoute)
 
 	httpServer := &http.Server{
 		Addr:              addr,
