@@ -6,7 +6,6 @@ import (
 	"strings"
 
 	"github.com/cogniflow/orchestrator/internal/decomposer"
-	"github.com/cogniflow/orchestrator/internal/router"
 )
 
 // RoutedNode is a per-node routing decision the UI renders as a badge.
@@ -139,6 +138,6 @@ type nodeSummary struct {
 	node decomposer.Node
 }
 
-func (n *nodeSummary) TaskClass() decomposer.TaskClass { return n.node.TaskClass() }
+func (n *nodeSummary) TaskClass() decomposer.TaskClass { return n.node.Requires.TaskClass }
 func (n *nodeSummary) LatencyBudgetMS() int            { return n.node.Requires.LatencyBudgetMS }
 func (n *nodeSummary) MaxCostUSD() float64             { return n.node.Requires.MaxCostUSD }

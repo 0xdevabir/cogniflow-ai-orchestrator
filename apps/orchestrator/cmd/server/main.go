@@ -3,6 +3,8 @@
 // Phase 0: prints a ready banner and binds /healthz.
 // Phase 1: wires the Streamer registry + /v1/chat SSE handler.
 // Phase 2: wires the Decomposer + /v1/plan JSON endpoint.
+// Phase 3: wires the Router (weighted heuristic + bandit logger) and
+// attaches per-node routing decisions to /v1/plan.
 package main
 
 import (
@@ -17,6 +19,7 @@ import (
 	"github.com/cogniflow/orchestrator/internal/api"
 	"github.com/cogniflow/orchestrator/internal/decomposer"
 	"github.com/cogniflow/orchestrator/internal/providers"
+	"github.com/cogniflow/orchestrator/internal/router"
 )
 
 func main() {
@@ -50,9 +53,44 @@ func main() {
 		MaxTokens: 4096,
 	})
 
+	// Build the router. The bandit log path is configurable via
+	// BANDIT_LOG (default: ./data/bandit.jsonl). If the path can't be
+	// opened, we log a warning and continue without logging.
+	var rtr router.Router
+	if bench, err := router.LoadBenchmarks(); err != nil {
+		log.Printf("router: failed to load benchmarks: %v (router disabled)", err)
+	} else if costs, err := router.LoadCostTable(); err != nil {
+		log.Printf("router: failed to load cost table: %v (router disabled)", err)
+	} else {
+		var logger router.FeedbackLogger
+		logPath := os.Getenv("BANDIT_LOG")
+		if logPath == "" {
+			logPath = "./data/bandit.jsonl"
+		}
+		if l, err := router.NewJSONLFeedbackLogger(logPath); err != nil {
+			log.Printf("router: bandit log disabled (%v)", err)
+		} else {
+			logger = l
+			log.Printf("router: bandit log → %s", logPath)
+		}
+		r, err := router.NewWeighted(router.WeightedConfig{
+			Bench:        bench,
+			Costs:        costs,
+			EstPromptTok: 500,
+			EstOutTok:    1000,
+			Logger:       logger,
+		})
+		if err != nil {
+			log.Printf("router: failed to build router: %v (router disabled)", err)
+		} else {
+			rtr = r
+		}
+	}
+
 	srv := &api.Server{
 		Registry:   reg,
 		Decomposer: decomp,
+		Router:     rtr,
 	}
 
 	mux := http.NewServeMux()

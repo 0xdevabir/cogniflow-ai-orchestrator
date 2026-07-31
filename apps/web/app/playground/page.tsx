@@ -3,18 +3,26 @@
 import { useState } from "react";
 import { StreamPanel } from "@/components/StreamPanel";
 import { DAGCanvas, type Plan, type PlanNode } from "@/components/DAGCanvas";
+import { NodeDetailsPanel, type RoutedNode } from "@/components/NodeDetailsPanel";
 
 type PlanState =
   | { kind: "idle" }
   | { kind: "loading" }
-  | { kind: "ready"; plan: Plan; passthrough: boolean }
+  | {
+      kind: "ready";
+      plan: Plan;
+      passthrough: boolean;
+      routed: Record<string, RoutedNode>;
+    }
   | { kind: "error"; message: string };
 
 export default function PlaygroundPage() {
   const [planState, setPlanState] = useState<PlanState>({ kind: "idle" });
+  const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
 
   async function showPlan(prompt: string) {
     setPlanState({ kind: "loading" });
+    setSelectedNodeId(null);
     try {
       const res = await fetch("/api/proxy/v1/plan", {
         method: "POST",
@@ -27,25 +35,45 @@ export default function PlaygroundPage() {
         return;
       }
       const data = await res.json();
+
+      // Index routing decisions by node_id for fast lookup at click time.
+      const routed: Record<string, RoutedNode> = {};
+      for (const r of data.routed ?? []) {
+        routed[r.node_id] = r;
+      }
+
       // Hydrate the orchestrator's snake_case into a Plan object.
       const plan: Plan = {
         version: data.plan?.version ?? "plan.v1",
-        nodes: (data.plan?.nodes ?? []).map(
-          (n: any): PlanNode => ({
+        nodes: (data.plan?.nodes ?? []).map((n: any): PlanNode => {
+          const r = routed[n.id];
+          return {
             id: n.id,
             role: n.role,
             payload: n.payload,
             status: "pending",
             needs_rag: !!n.needs_rag,
-          }),
-        ),
+            task_class: n?.requires?.task_class,
+            model: r?.model,
+            score: r?.score,
+            breakdown: r?.breakdown,
+            reason: r?.reason,
+          };
+        }),
         edges: (data.plan?.edges ?? []).map((e: any) => ({ from: e.from, to: e.to })),
       };
-      setPlanState({ kind: "ready", plan, passthrough: !!data.passthrough });
+      setPlanState({ kind: "ready", plan, passthrough: !!data.passthrough, routed });
     } catch (e: any) {
       setPlanState({ kind: "error", message: e?.message ?? "Unknown error" });
     }
   }
+
+  const selectedNode =
+    planState.kind === "ready" && selectedNodeId
+      ? planState.plan.nodes.find((n) => n.id === selectedNodeId) ?? null
+      : null;
+  const selectedRouted =
+    planState.kind === "ready" && selectedNodeId ? planState.routed[selectedNodeId] ?? null : null;
 
   return (
     <main
@@ -58,11 +86,12 @@ export default function PlaygroundPage() {
     >
       <h1 style={{ marginBottom: 4 }}>🎮 Playground</h1>
       <p style={{ color: "#666", marginTop: 0 }}>
-        Phase 2 — Decompose a prompt into a DAG, then stream a single-model answer.
+        Phase 3 — Decompose a prompt into a DAG, route each node to a model, then stream a
+        single-model answer.
       </p>
 
       <section style={{ marginTop: "1.25rem", marginBottom: "1.5rem" }}>
-        <PlanSection state={planState} onShowPlan={showPlan} />
+        <PlanSection state={planState} onShowPlan={showPlan} onNodeClick={setSelectedNodeId} />
       </section>
 
       <section style={{ marginTop: "1.5rem" }}>
@@ -75,13 +104,21 @@ export default function PlaygroundPage() {
       </section>
 
       <p style={{ marginTop: "1.5rem", fontSize: "0.85rem", color: "#888" }}>
-        Phase 3 will add per-node <strong>model routing</strong>. Phase 4 will add a
-        <strong> Run</strong> button that executes the plan in parallel.
+        Click a node in the DAG to see the routing breakdown. Phase 4 will add a
+        <strong> Run</strong> button that executes the routed plan in parallel.
       </p>
 
       <p>
         <a href="/">← Back home</a>
       </p>
+
+      {selectedNode && (
+        <NodeDetailsPanel
+          node={selectedNode}
+          routed={selectedRouted}
+          onClose={() => setSelectedNodeId(null)}
+        />
+      )}
     </main>
   );
 }
@@ -89,9 +126,11 @@ export default function PlaygroundPage() {
 function PlanSection({
   state,
   onShowPlan,
+  onNodeClick,
 }: {
   state: PlanState;
   onShowPlan: (prompt: string) => void;
+  onNodeClick: (id: string) => void;
 }) {
   const [prompt, setPrompt] = useState(
     "Plan a 3-day foodie trip to Tokyo under $500. Also compare NVIDIA's and Apple's 2024 strategy.",
@@ -99,7 +138,7 @@ function PlanSection({
 
   return (
     <div>
-      <h2 style={{ fontSize: "1.1rem", marginBottom: 8 }}>🧩 Plan (decompose a prompt)</h2>
+      <h2 style={{ fontSize: "1.1rem", marginBottom: 8 }}>🧩 Plan + Router (Phase 3)</h2>
 
       <textarea
         value={prompt}
@@ -118,7 +157,7 @@ function PlanSection({
         }}
       />
 
-      <div style={{ display: "flex", gap: 8, marginTop: 8, alignItems: "center" }}>
+      <div style={{ display: "flex", gap: 8, marginTop: 8, alignItems: "center", flexWrap: "wrap" }}>
         <button
           onClick={() => onShowPlan(prompt)}
           disabled={state.kind === "loading"}
@@ -133,7 +172,7 @@ function PlanSection({
             opacity: state.kind === "loading" ? 0.7 : 1,
           }}
         >
-          {state.kind === "loading" ? "Decomposing…" : "Show Plan"}
+          {state.kind === "loading" ? "Decomposing + Routing…" : "Show Plan"}
         </button>
 
         {state.kind === "ready" && state.passthrough && (
@@ -162,7 +201,22 @@ function PlanSection({
               fontSize: "0.8rem",
             }}
           >
-            ✓ {state.plan.nodes.length}-node DAG
+            ✓ {state.plan.nodes.length}-node DAG · {Object.keys(state.routed).length} routed
+          </span>
+        )}
+
+        {state.kind === "ready" && !state.passthrough && (
+          <span
+            style={{
+              padding: "0.35rem 0.75rem",
+              background: "#eef2ff",
+              color: "#3730a3",
+              border: "1px solid #c7d2fe",
+              borderRadius: 999,
+              fontSize: "0.8rem",
+            }}
+          >
+            💡 Click any node for score breakdown
           </span>
         )}
       </div>
@@ -179,7 +233,7 @@ function PlanSection({
               color: "var(--cf-muted)",
             }}
           >
-            Click <strong>Show Plan</strong> to decompose a prompt.
+            Click <strong>Show Plan</strong> to decompose + route a prompt.
           </div>
         )}
 
@@ -193,7 +247,7 @@ function PlanSection({
               color: "var(--cf-muted)",
             }}
           >
-            ⏳ Decomposing…
+            ⏳ Decomposing + routing…
           </div>
         )}
 
@@ -213,7 +267,7 @@ function PlanSection({
 
         {state.kind === "ready" && (
           <>
-            <DAGCanvas plan={state.plan} />
+            <DAGCanvas plan={state.plan} onNodeClick={onNodeClick} />
             <details style={{ marginTop: 8 }}>
               <summary style={{ cursor: "pointer", color: "#555" }}>Raw plan JSON</summary>
               <pre

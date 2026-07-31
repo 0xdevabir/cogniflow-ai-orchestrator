@@ -1,6 +1,7 @@
 # --- Go ---
 apps/orchestrator/bin/
 apps/orchestrator/coverage.out
+apps/orchestrator/data/*.jsonl
 
 # --- Python ---
 apps/ml-gateway/.venv/
@@ -17,6 +18,8 @@ apps/web/node_modules/
 apps/web/.next/
 apps/web/out/
 apps/web/.turbo/
+apps/web/tsconfig.tsbuildinfo
+*.tsbuildinfo
 
 # --- General ---
 .env
