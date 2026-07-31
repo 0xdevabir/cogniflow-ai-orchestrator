@@ -15,36 +15,40 @@
 - **Spec:** see Phase 0 in [`docs/architecture.md`](architecture.md) — was completed in the initial bootstrap.
 
 ## Phase 1 — Provider abstraction + happy-path chat  *(1 day)*
-- [ ] `Streamer` interface + `Chunk` struct
-- [ ] OpenAI adapter (real), Anthropic adapter (real), mock adapter
-- [ ] FastAPI ml-gateway provider endpoints
-- [ ] Go chat handler with SSE
-- [ ] Next.js `StreamPanel` listening to SSE
+- [x] `Streamer` interface + `Chunk` struct
+- [x] OpenAI adapter (real), Anthropic adapter (real), mock adapter
+- [x] FastAPI ml-gateway provider endpoints
+- [x] Go chat handler with SSE
+- [x] Next.js `StreamPanel` listening to SSE
 - **Demo:** "Explain CAP theorem" streams in the UI from OpenAI.
 - **Build spec:** [`build-specs/phase-1-providers-chat.md`](build-specs/phase-1-providers-chat.md)
 
 ## Phase 2 — Prompt Decomposer  *(1 day)*
-- [ ] `plan.schema.json` (✅ already in `packages/schemas/`)
-- [ ] Versioned decomposer prompt (✅ in `packages/prompts/`)
-- [ ] Go decomposer with JSON-schema constrained decoding
-- [ ] `/v1/plan` debug endpoint
-- [ ] React Flow DAG viz
+- [x] `plan.schema.json` (✅ already in `packages/schemas/`)
+- [x] Versioned decomposer prompt (✅ in `packages/prompts/`)
+- [x] Go decomposer with JSON-schema constrained decoding
+- [x] `/v1/plan` debug endpoint
+- [x] React Flow DAG viz
 - **Demo:** A complex prompt renders as a 4-node DAG in the UI.
 - **Build spec:** [`build-specs/phase-2-decomposer.md`](build-specs/phase-2-decomposer.md)
 
 ## Phase 3 — Model Router  *(1 day)*
-- [ ] `WeightedRouter` + `Bandit` interface
-- [ ] `benchmarks.json` + `cost_table.json`
-- [ ] Per-node routing annotations
-- [ ] "Why this model?" score-breakdown panel
+- [x] `WeightedRouter` + `Bandit` interface
+- [x] `benchmarks.json` + `cost_table.json`
+- [x] Per-node routing annotations
+- [x] "Why this model?" score-breakdown panel
 - **Demo:** Each node of the DAG routes to a different model.
 - **Build spec:** [`build-specs/phase-3-router.md`](build-specs/phase-3-router.md)
 
 ## Phase 4 — DAG executor + parallel sub-tasks  *(1 day)*
-- [ ] In-process DAG executor (goroutines, joins, context cancel)
-- [ ] Temporal adapter stub
-- [ ] UI DAG node status transitions
-- **Demo:** 4-node plan runs in parallel, all nodes `ok`, UI shows each stream.
+- [x] In-process DAG executor (goroutines, joins, context cancel)
+- [x] Topological sort with cycle/dangling-edge detection
+- [x] Upstream text injection into downstream prompts
+- [x] Temporal adapter stub + `ExecutorMode` flag
+- [x] `/v1/run` SSE endpoint emitting `plan`, `node_status`, `chunk`, `done`
+- [x] `MultiStreamPanel` UI bucketed by `node_id`
+- [x] Live DAG node color transitions + animated edges
+- **Demo:** 4-node diamond plan executes in 3 topological levels, all nodes `ok`, UI shows each stream side-by-side.
 - **Build spec:** [`build-specs/phase-4-dag-executor.md`](build-specs/phase-4-dag-executor.md)
 
 ## Phase 5 — Fusion Engine + Citations  *(1½ days)*
