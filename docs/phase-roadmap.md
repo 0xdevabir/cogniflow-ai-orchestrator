@@ -88,14 +88,15 @@
 - **Demo:** Set `max_cost_usd` tight → `downgrade` event swaps `opus → sonnet → mini → mock`; run completes; `eval` event shows faithfulness %, hallucination flags, model mix, savings.
 - **Build spec:** [`build-specs/phase-7-eval-budget.md`](build-specs/phase-7-eval-budget.md)
 
-## Phase 8 — Production polish  *(3–4 days, cherry-pick)*
-- [ ] Temporal durable DAG
-- [ ] OpenTelemetry + Langfuse
-- [ ] Stripe metering
-- [ ] Neo4j entity store
-- [ ] Self-improving bandit loop
-- [ ] Helm chart
-- [ ] Demo script (`docs/demo-script.md`)
+## Phase 8 — Production polish  *(cherry-pick; what shipped in this repo)*
+- [x] **OpenTelemetry traces** — `internal/obs` (stdout / OTLP / none), one span per `decomposer.decompose`, `dag.Run`, `dag.runNode`, `provider.stream`, `fusion.Fuse`, `eval.Judge`; W3C traceparent propagation; `trace_id` + `span_id` surfaced on the `done` SSE event so the web UI can link straight into a collector
+- [x] **Meterer interface + Stripe stub** — `internal/meter` with `Noop`/`JSONL`/`Stripe` impls; per-node `usage.v1` event (`run_id`, `node_id`, `model`, tokens, cost, carbon, latency, workspace, occurred_at); orchestrator picks Stripe when `STRIPE_API_KEY` + `STRIPE_METER_ID` are set, falls back to JSONL via `METER_LOG`, then Noop
+- [x] **Self-improving bandit loop** — `internal/banditlearn` + `cmd/bandit-learn` CLI reads `data/bandit.jsonl`, groups by `(task_class, model)`, declares a winner, writes `data/recommendation.json`; orchestrator loads it on boot via `ROUTER_RECOMMENDATION` and `router.SetWeights` boosts bench weight (capped at +0.20) per winner
+- [x] **Helm chart** — `deploy/cogniflow/` (apiVersion v2); renders `ServiceAccount`, `Secret`, `PersistentVolumeClaim` (1Gi for bandit log), `Deployment`+`Service`+`HPA` for orchestrator, `Deployment`+`Service` for web, optional `Ingress`; non-root, read-only root FS, dropped caps; `helm lint` passes
+- [x] **Demo script** — `docs/demo-script.md` rewritten with frame-by-frame narration, recruiter one-liners, 30-second cut, recording checklist
+- [ ] Temporal durable DAG *(deferred — stub in `internal/dag`, Phase 4)*
+- [ ] Neo4j entity store *(deferred — `entity.NoopStore` placeholder from Phase 6)*
+- [ ] TruLens / DeepEval harness *(deferred)*
 - **Build spec:** [`build-specs/phase-8-polish.md`](build-specs/phase-8-polish.md)
 
 ## Effort & dependency map
