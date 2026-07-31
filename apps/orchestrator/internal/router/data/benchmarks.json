@@ -1,0 +1,66 @@
+{
+  "_comment": "CogniFlow benchmarks — per-(task_class, model) quality scores 0..1. Higher is better. Numbers are hand-tuned seed values; the bandit logs in Phase 8 will overlay empirical mean satisfaction on top of these.",
+  "scores": {
+    "reasoning": {
+      "openai:gpt-4o": 0.92,
+      "openai:gpt-4o-mini": 0.78,
+      "anthropic:claude-3-5-sonnet-latest": 0.93,
+      "anthropic:claude-3-opus-latest": 0.97,
+      "anthropic:claude-3-haiku-20240307": 0.70,
+      "mistral:mistral-large-latest": 0.85,
+      "mistral:mistral-small-latest": 0.68,
+      "ollama:llama3.1:70b": 0.78,
+      "mock:echo-v1": 0.10
+    },
+    "summarization": {
+      "openai:gpt-4o": 0.91,
+      "openai:gpt-4o-mini": 0.88,
+      "anthropic:claude-3-5-sonnet-latest": 0.90,
+      "anthropic:claude-3-haiku-20240307": 0.85,
+      "mistral:mistral-small-latest": 0.82,
+      "ollama:llama3.1:8b": 0.74,
+      "mock:echo-v1": 0.10
+    },
+    "creative": {
+      "openai:gpt-4o": 0.88,
+      "openai:gpt-4o-mini": 0.78,
+      "anthropic:claude-3-5-sonnet-latest": 0.92,
+      "anthropic:claude-3-opus-latest": 0.94,
+      "mock:echo-v1": 0.10
+    },
+    "factual": {
+      "openai:gpt-4o": 0.90,
+      "openai:gpt-4o-mini": 0.82,
+      "anthropic:claude-3-5-sonnet-latest": 0.91,
+      "anthropic:claude-3-haiku-20240307": 0.78,
+      "mistral:mistral-large-latest": 0.83,
+      "ollama:llama3.1:70b": 0.79,
+      "mock:echo-v1": 0.10
+    },
+    "code": {
+      "openai:gpt-4o": 0.92,
+      "openai:gpt-4o-mini": 0.78,
+      "anthropic:claude-3-5-sonnet-latest": 0.93,
+      "anthropic:claude-3-opus-latest": 0.95,
+      "anthropic:claude-3-haiku-20240307": 0.74,
+      "mock:echo-v1": 0.10
+    },
+    "translation": {
+      "openai:gpt-4o-mini": 0.90,
+      "openai:gpt-4o": 0.91,
+      "anthropic:claude-3-5-sonnet-latest": 0.90,
+      "anthropic:claude-3-haiku-20240307": 0.88,
+      "mock:echo-v1": 0.10
+    },
+    "vision": {
+      "openai:gpt-4o": 0.95,
+      "anthropic:claude-3-5-sonnet-latest": 0.92,
+      "mock:echo-v1": 0.10
+    },
+    "routing": {
+      "openai:gpt-4o-mini": 0.85,
+      "anthropic:claude-3-haiku-20240307": 0.82,
+      "mock:echo-v1": 0.50
+    }
+  }
+}

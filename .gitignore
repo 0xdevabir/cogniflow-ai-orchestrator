@@ -1,0 +1,31 @@
+# --- Go ---
+apps/orchestrator/bin/
+apps/orchestrator/coverage.out
+
+# --- Python ---
+apps/ml-gateway/.venv/
+apps/ml-gateway/__pycache__/
+apps/ml-gateway/**/__pycache__/
+apps/ml-gateway/*.egg-info/
+apps/ml-gateway/dist/
+apps/ml-gateway/build/
+apps/ml-gateway/.pytest_cache/
+apps/ml-gateway/.ruff_cache/
+
+# --- Node ---
+apps/web/node_modules/
+apps/web/.next/
+apps/web/out/
+apps/web/.turbo/
+
+# --- General ---
+.env
+.env.local
+.env.*.local
+*.log
+.DS_Store
+.vscode/
+.idea/
+
+# --- Local infra ---
+docker-compose.override.yml

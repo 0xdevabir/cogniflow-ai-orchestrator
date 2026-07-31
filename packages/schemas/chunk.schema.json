@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cogniflow.dev/schemas/chunk.v1.json",
+  "title": "Chunk",
+  "description": "A single streaming unit emitted by a provider adapter.",
+  "type": "object",
+  "required": ["v", "stream_id", "text"],
+  "properties": {
+    "v":         { "const": "chunk.v1" },
+    "stream_id": { "type": "string" },
+    "node_id":   { "type": "string" },
+    "model":     { "type": "string" },
+    "text":      { "type": "string" },
+    "conf":      { "type": "number", "minimum": 0, "maximum": 1, "default": 1.0 },
+    "finish":    { "type": "boolean", "default": false },
+    "cite":      {
+      "type": "array",
+      "items": { "$ref": "#/$defs/SpanRef" }
+    }
+  },
+  "$defs": {
+    "SpanRef": {
+      "type": "object",
+      "required": ["sub_task_id", "model"],
+      "properties": {
+        "sub_task_id":  { "type": "string" },
+        "model":        { "type": "string" },
+        "prompt_hash":  { "type": "string" },
+        "doc_id":       { "type": "string" },
+        "char_start":   { "type": "integer", "minimum": 0 },
+        "char_end":     { "type": "integer", "minimum": 0 }
+      }
+    }
+  }
+}

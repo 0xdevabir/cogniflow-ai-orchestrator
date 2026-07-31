@@ -1,0 +1,51 @@
+{
+  "_comment": "CogniFlow cost table — per-million-token USD prices (input, output) and p95 latency estimates. Carbon is gCO2 per 1M output tokens (rough seed). Numbers reflect Q4 2024 list prices; the bandit logs in Phase 8 overlay empirical values.",
+  "per_million_input_usd": {
+    "openai:gpt-4o": 2.50,
+    "openai:gpt-4o-mini": 0.15,
+    "anthropic:claude-3-5-sonnet-latest": 3.00,
+    "anthropic:claude-3-opus-latest": 15.00,
+    "anthropic:claude-3-haiku-20240307": 0.25,
+    "mistral:mistral-large-latest": 2.00,
+    "mistral:mistral-small-latest": 0.20,
+    "ollama:llama3.1:70b": 0.00,
+    "ollama:llama3.1:8b": 0.00,
+    "mock:echo-v1": 0.00
+  },
+  "per_million_output_usd": {
+    "openai:gpt-4o": 10.00,
+    "openai:gpt-4o-mini": 0.60,
+    "anthropic:claude-3-5-sonnet-latest": 15.00,
+    "anthropic:claude-3-opus-latest": 75.00,
+    "anthropic:claude-3-haiku-20240307": 1.25,
+    "mistral:mistral-large-latest": 6.00,
+    "mistral:mistral-small-latest": 0.60,
+    "ollama:llama3.1:70b": 0.00,
+    "ollama:llama3.1:8b": 0.00,
+    "mock:echo-v1": 0.00
+  },
+  "latency_p95_ms": {
+    "openai:gpt-4o": 1800,
+    "openai:gpt-4o-mini": 900,
+    "anthropic:claude-3-5-sonnet-latest": 2200,
+    "anthropic:claude-3-opus-latest": 4000,
+    "anthropic:claude-3-haiku-20240307": 700,
+    "mistral:mistral-large-latest": 1500,
+    "mistral:mistral-small-latest": 800,
+    "ollama:llama3.1:70b": 6000,
+    "ollama:llama3.1:8b": 1500,
+    "mock:echo-v1": 100
+  },
+  "carbon_g_per_million_tokens": {
+    "openai:gpt-4o": 1.20,
+    "openai:gpt-4o-mini": 0.30,
+    "anthropic:claude-3-5-sonnet-latest": 1.50,
+    "anthropic:claude-3-opus-latest": 4.00,
+    "anthropic:claude-3-haiku-20240307": 0.25,
+    "mistral:mistral-large-latest": 1.00,
+    "mistral:mistral-small-latest": 0.30,
+    "ollama:llama3.1:70b": 0.05,
+    "ollama:llama3.1:8b": 0.01,
+    "mock:echo-v1": 0.00
+  }
+}

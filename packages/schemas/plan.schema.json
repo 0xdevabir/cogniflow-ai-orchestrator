@@ -1,0 +1,51 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cogniflow.dev/schemas/plan.v1.json",
+  "title": "Plan",
+  "description": "A DAG of sub-tasks produced by the CogniFlow decomposer.",
+  "type": "object",
+  "required": ["version", "nodes", "edges"],
+  "properties": {
+    "version": { "const": "plan.v1" },
+    "nodes": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/Node" }
+    },
+    "edges": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/Edge" }
+    }
+  },
+  "$defs": {
+    "Node": {
+      "type": "object",
+      "required": ["id", "role", "payload", "depends_on", "requires"],
+      "properties": {
+        "id":       { "type": "string", "pattern": "^[a-z0-9_]+$" },
+        "role":     { "enum": ["researcher", "planner", "coder", "summarizer", "critic", "synthesizer", "factchecker", "translator"] },
+        "payload":  { "type": "string", "minLength": 1 },
+        "depends_on": { "type": "array", "items": { "type": "string" } },
+        "needs_rag":   { "type": "boolean", "default": false },
+        "requires": {
+          "type": "object",
+          "required": ["task_class", "modality"],
+          "properties": {
+            "task_class":         { "enum": ["reasoning", "summarization", "creative", "factual", "code", "translation", "vision", "routing"] },
+            "modality":           { "enum": ["text", "image", "audio", "code"] },
+            "latency_budget_ms":  { "type": "integer", "minimum": 100, "default": 15000 },
+            "max_cost_usd":       { "type": "number", "minimum": 0, "default": 0.10 }
+          }
+        }
+      }
+    },
+    "Edge": {
+      "type": "object",
+      "required": ["from", "to"],
+      "properties": {
+        "from": { "type": "string" },
+        "to":   { "type": "string" }
+      }
+    }
+  }
+}
