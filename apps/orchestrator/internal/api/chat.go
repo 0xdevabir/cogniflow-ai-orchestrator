@@ -17,6 +17,7 @@ import (
 
 	"github.com/cogniflow/orchestrator/internal/decomposer"
 	"github.com/cogniflow/orchestrator/internal/entity"
+	"github.com/cogniflow/orchestrator/internal/meter"
 	"github.com/cogniflow/orchestrator/internal/providers"
 	"github.com/cogniflow/orchestrator/internal/rag"
 	"github.com/cogniflow/orchestrator/internal/router"
@@ -30,6 +31,7 @@ type Server struct {
 	RAG         *rag.Service  // optional; nil disables docs + retrieval
 	EntityStore entity.Store  // optional; NoopStore in Phase 6
 	CostTable   *router.CostTable // optional; used by the budget cascade (Phase 7)
+	Meter       meter.Meterer     // optional; NoopMeterer when unset (Phase 8)
 }
 
 // chatRequest is the JSON body the web app POSTs.

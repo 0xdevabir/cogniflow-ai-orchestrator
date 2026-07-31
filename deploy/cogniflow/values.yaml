@@ -1,0 +1,138 @@
+# Default values for cogniflow.
+#
+# Usage:
+#   helm install cogniflow ./deploy/cogniflow \
+#     --set secrets.openaiApiKey=$OPENAI_API_KEY \
+#     --set secrets.anthropicApiKey=$ANTHROPIC_API_KEY
+#
+# All values may be overridden via --set / -f values.override.yaml.
+
+# -- Global knobs --------------------------------------------------------
+image:
+  registry: ghcr.io
+  repository: cogniflow
+  tag: v0.1.0
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+# -- Orchestrator --------------------------------------------------------
+orchestrator:
+  enabled: true
+  replicaCount: 2
+  port: 8080
+  resources:
+    requests:
+      cpu: 200m
+      memory: 256Mi
+    limits:
+      cpu: 1000m
+      memory: 1Gi
+  autoscaling:
+    enabled: true
+    minReplicas: 2
+    maxReplicas: 10
+    targetCPUUtilizationPercentage: 70
+    targetMemoryUtilizationPercentage: 80
+  env:
+    # Optional decomposer model (defaults to gpt-4o-mini in main.go).
+    DECOMP_MODEL: "openai:gpt-4o-mini"
+    # BANDIT_LOG: "/data/bandit.jsonl"
+    # ROUTER_RECOMMENDATION: "/data/recommendation.json"
+    # OTEL_EXPORTER: "otlp"
+    # OTEL_EXPORTER_OTLP_ENDPOINT: "otel-collector:4317"
+  probes:
+    liveness:
+      httpGet:
+        path: /healthz
+        port: http
+      initialDelaySeconds: 5
+      periodSeconds: 10
+    readiness:
+      httpGet:
+        path: /healthz
+        port: http
+      initialDelaySeconds: 3
+      periodSeconds: 5
+
+# -- Web (Next.js) -------------------------------------------------------
+web:
+  enabled: true
+  replicaCount: 2
+  port: 3000
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+  env:
+    NEXT_PUBLIC_API_BASE: "/api"
+
+# -- ml-gateway (Python FastAPI; disabled by default) -------------------
+mlGateway:
+  enabled: false
+  replicaCount: 1
+  port: 8000
+
+# -- Secrets -------------------------------------------------------------
+secrets:
+  # Set via --set or envsubst in CI; never commit raw keys.
+  openaiApiKey: ""
+  anthropicApiKey: ""
+  mistralApiKey: ""
+  hfApiKey: ""
+  ollamaBaseUrl: ""
+  stripeApiKey: ""
+  stripeMeterId: ""
+
+# -- Persistence ---------------------------------------------------------
+persistence:
+  enabled: true
+  bandit:
+    size: 1Gi
+    mountPath: /data
+  usage:
+    enabled: false
+    size: 5Gi
+    mountPath: /var/log/cogniflow
+
+# -- Networking ----------------------------------------------------------
+service:
+  type: ClusterIP
+
+ingress:
+  enabled: false
+  className: nginx
+  annotations: {}
+  hosts:
+    - host: cogniflow.local
+      paths:
+        - path: /
+          pathType: Prefix
+  tls: []
+
+# -- Observability -------------------------------------------------------
+serviceAccount:
+  create: true
+  annotations: {}
+  name: ""
+
+podAnnotations: {}
+
+# Pod-level security contexts are conservative by default. Relax via
+# values.yaml override if your cluster requires it.
+podSecurityContext:
+  fsGroup: 1000
+  runAsNonRoot: true
+  runAsUser: 1000
+
+securityContext:
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop:
+      - ALL
+  readOnlyRootFilesystem: true

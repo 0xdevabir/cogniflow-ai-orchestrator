@@ -2,6 +2,8 @@ package api
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"net/http"
 	"sync"
@@ -11,6 +13,7 @@ import (
 	"github.com/cogniflow/orchestrator/internal/decomposer"
 	"github.com/cogniflow/orchestrator/internal/eval"
 	"github.com/cogniflow/orchestrator/internal/fusion"
+	"github.com/cogniflow/orchestrator/internal/obs"
 	"github.com/cogniflow/orchestrator/internal/providers"
 )
 
@@ -173,6 +176,11 @@ func (s *Server) HandleRun(w http.ResponseWriter, r *http.Request) {
 	if runEval {
 		executor.Judge = eval.New(s.Registry, s.CostTable, "openai:gpt-4o-mini")
 	}
+	// Phase 8: meter + run id. The run id is propagated to every usage
+	// event so a Stripe invoice / JSONL row can be traced back to the
+	// trace id + user request.
+	executor.Meter = s.Meter
+	executor.RunID = newRunID()
 
 	// Use a child context we can cancel cleanly if the client disconnects.
 	ctx, cancel := context.WithCancel(r.Context())
@@ -199,3 +207,19 @@ func (s *runSink) Emit(event string, data any) error {
 	defer s.mu.Unlock()
 	return writeSSE(s.w, s.flusher, event, data)
 }
+
+// newRunID returns a 16-hex-char random id. Used to tag every usage event
+// for downstream billing + replay.
+func newRunID() string {
+	var b [8]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		// crypto/rand failure is extremely rare; fall back to a non-random
+		// id rather than panic — billing ties still work because the trace
+		// id is also unique per request.
+		return "run-static"
+	}
+	return "run-" + hex.EncodeToString(b[:])
+}
+
+// ensure unused-import lint doesn't trip when Meter wiring moves around.
+var _ = obs.AttrStr

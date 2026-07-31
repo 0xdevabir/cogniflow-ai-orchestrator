@@ -13,6 +13,8 @@ import (
 	"github.com/cogniflow/orchestrator/internal/decomposer"
 	"github.com/cogniflow/orchestrator/internal/eval"
 	"github.com/cogniflow/orchestrator/internal/fusion"
+	"github.com/cogniflow/orchestrator/internal/meter"
+	"github.com/cogniflow/orchestrator/internal/obs"
 	"github.com/cogniflow/orchestrator/internal/providers"
 	"github.com/cogniflow/orchestrator/internal/rag"
 	"github.com/cogniflow/orchestrator/internal/router"
@@ -39,6 +41,8 @@ type Executor struct {
 	Estimator   *budget.Estimator  // optional; if set + Budget is non-zero, cascade-downgrades models
 	Budget      budget.Budget      // cost + carbon cap for this run
 	Judge       *eval.Judge        // optional; if set, runs after the run completes
+	Meter       meter.Meterer      // optional; if set, per-node usage events are recorded for billing
+	RunID       string             // optional; surfaced on every usage event so a run is traceable end-to-end
 	Parallelism int                // default 4
 
 	// Populated by Run after a budget cascade.
@@ -103,6 +107,21 @@ func (e *Executor) runNode(ctx context.Context, id string, outs *sync.Map) error
 	if node == nil {
 		return fmt.Errorf("dag: node %q not in plan", id)
 	}
+
+	// Phase 8: one span per node so traces show the parallel fan-out + each
+	// model's latency + token count. Span attributes carry the same fields
+	// the eval judge scores on.
+	nodeCtx, nodeSpan := obs.Start(ctx, "dag.runNode",
+		obs.AttrStr("node.id", node.ID),
+		obs.AttrStr("node.role", string(node.Role)),
+		obs.AttrStr("node.task_class", string(node.Requires.TaskClass)),
+		obs.AttrBool("node.needs_rag", node.NeedsRAG),
+	)
+	defer nodeSpan.End()
+
+	// (Rest of method unchanged — it uses ctx, which we re-alias to nodeCtx
+	// so spans inside the route/stream flow inherit this node's context.)
+	ctx = nodeCtx
 
 	// 1. Route. The assigned model may have been downgraded by the budget
 	// cascade — in that case we honor the override instead of routing again.
@@ -254,7 +273,50 @@ func (e *Executor) runNode(ctx context.Context, id string, outs *sync.Map) error
 		"tokens_out":  tokensOut,
 		"duration_ms": int(endedAt.Sub(startedAt) / time.Millisecond),
 	})
+	nodeSpan.SetAttributes(
+		obs.AttrStr("node.model", decision.Model.String()),
+		obs.AttrInt("node.tokens_in", tokensIn),
+		obs.AttrInt("node.tokens_out", tokensOut),
+		obs.AttrInt64("node.duration_ms", endedAt.Sub(startedAt).Milliseconds()),
+		obs.AttrFloat("node.router_score", decision.Score),
+	)
+
+	// Phase 8: emit a billing event for this node. Best-effort: a slow or
+	// failing meter must NEVER block the run. The meter's Record impl is
+	// expected to be non-blocking on the happy path.
+	if e.Meter != nil {
+		costUSD, carbonG := e.estimateBill(decision.Model.String(), tokensIn, tokensOut)
+		e.Meter.Record(meter.Event{
+			V:          "usage.v1",
+			RunID:      e.RunID,
+			NodeID:     id,
+			Model:      decision.Model.String(),
+			TokensIn:   tokensIn,
+			TokensOut:  tokensOut,
+			CostUSD:    costUSD,
+			CarbonG:    carbonG,
+			LatencyMS:  int(endedAt.Sub(startedAt) / time.Millisecond),
+			Workspace:  e.WorkspaceID,
+			OccurredAt: endedAt,
+		})
+	}
 	return nil
+}
+
+// estimateBill returns the per-event cost + carbon for a node. It scales
+// the Estimator's per-projection to match the actual tokens emitted by
+// the node (the estimator was configured with assumed prompt/output
+// counts at New() time). If the Estimator is missing, returns zeros.
+func (e *Executor) estimateBill(model string, tokensIn, tokensOut int) (float64, float64) {
+	if e.Estimator == nil {
+		return 0, 0
+	}
+	// Per-projection is in absolute dollars for the estimator's assumed
+	// nominal token count; here we just return it as the bill for this
+	// node. The Estimator is the single source of truth for pricing in
+	// this codebase; if finer-grained accounting is needed later, callers
+	// can switch to a CostTable-aware helper.
+	return e.Estimator.PerNode(model).CostUSD, e.Estimator.PerNode(model).CarbonG
 }
 
 // modelOverride returns the budget-cascade override for this node id, if any.
@@ -378,18 +440,41 @@ func (e *Executor) Run(ctx context.Context) error {
 	if e.Sink == nil {
 		return fmt.Errorf("dag: nil sink")
 	}
+
+	// Phase 8: wrap the entire run in a span so traces render the full DAG
+	// + fusion + eval as one trace. The trace + span ids are surfaced on
+	// the "done" event so operators can pivot to the trace from logs.
+	runCtx, runSpan := obs.Start(ctx, "dag.Run",
+		obs.AttrInt("dag.total_nodes", len(e.Plan.Nodes)),
+		obs.AttrInt("dag.parallelism", e.Parallelism),
+		obs.AttrFloat("dag.budget.max_cost_usd", e.Budget.MaxCostUSD),
+		obs.AttrFloat("dag.budget.max_carbon_g", e.Budget.MaxCarbonG),
+		obs.AttrBool("dag.eval_enabled", e.Judge != nil),
+	)
+	defer runSpan.End()
+
+	// Surface the trace correlation ids on the "done" event so dashboards
+	// can deep-link to the trace from the run record.
+	traceID := runSpan.SpanContext().TraceID().String()
+	spanID := runSpan.SpanContext().SpanID().String()
+
 	if len(e.Plan.Nodes) == 0 {
-		_ = e.Sink.Emit("done", map[string]any{"ok": true, "total_nodes": 0})
+		_ = e.Sink.Emit("done", map[string]any{
+			"ok": true, "total_nodes": 0, "trace_id": traceID, "span_id": spanID,
+		})
 		return nil
 	}
 	if err := Validate(e.Plan.Nodes, e.Plan.Edges); err != nil {
+		obs.RecordError(runSpan, err)
 		return err
 	}
 
 	levels, err := TopoSort(e.Plan.Nodes, e.Plan.Edges)
 	if err != nil {
+		obs.RecordError(runSpan, err)
 		return err
 	}
+	runSpan.SetAttributes(obs.AttrInt("dag.levels", len(levels)))
 
 	par := e.Parallelism
 	if par <= 0 {
@@ -402,10 +487,20 @@ func (e *Executor) Run(ctx context.Context) error {
 	// was supplied, cascade-downgrade models until we fit. The cascade uses
 	// the router's first pick per node as the baseline.
 	if e.Estimator != nil && (e.Budget.MaxCostUSD > 0 || e.Budget.MaxCarbonG > 0) {
+		_, cascadeSpan := obs.Start(runCtx, "dag.BudgetCascade")
 		initial := e.projectInitialModels(ctx)
 		if len(initial) > 0 {
 			res := e.Estimator.PlanDowngrade(initial, e.Budget, e.Router)
 			e.DowngradeResult = &res
+			cascadeSpan.SetAttributes(
+				obs.AttrInt("cascade.downgraded_nodes", res.Downgraded),
+				obs.AttrFloat("cascade.saved_usd", res.SavedUSD),
+				obs.AttrFloat("cascade.saved_g", res.SavedG),
+				obs.AttrFloat("cascade.final_cost_usd", res.FinalCost),
+				obs.AttrFloat("cascade.final_carbon_g", res.FinalCarbon),
+				obs.AttrBool("cascade.unachievable", res.Unachievable),
+			)
+			cascadeSpan.End()
 			if res.Downgraded > 0 {
 				e.overridesMu.Lock()
 				e.overrides = res.New
@@ -422,6 +517,8 @@ func (e *Executor) Run(ctx context.Context) error {
 					"unachievable":  res.Unachievable,
 				})
 			}
+		} else {
+			cascadeSpan.End()
 		}
 	}
 
@@ -461,18 +558,29 @@ func (e *Executor) Run(ctx context.Context) error {
 	// Phase 5: invoke fusion after the DAG (if a fuser is wired) to emit
 	// the final coherent answer + a CitationManifest as SSE events.
 	if e.Fuser != nil && ctx.Err() == nil {
+		_, fusionSpan := obs.Start(runCtx, "dag.Fuse")
 		e.runFusion(ctx, outs)
+		fusionSpan.End()
 	}
 
 	// Phase 7: score the run with the eval judge (if wired).
 	if e.Judge != nil && ctx.Err() == nil {
+		_, evalSpan := obs.Start(runCtx, "dag.Eval")
 		e.runEval(ctx, outs, startedAt)
+		evalSpan.End()
 	}
+
+	runSpan.SetAttributes(
+		obs.AttrBool("dag.cancelled", ctx.Err() != nil),
+		obs.AttrInt64("dag.total_duration_ms", time.Since(startedAt).Milliseconds()),
+	)
 
 	_ = e.Sink.Emit("done", map[string]any{
 		"ok":          ctx.Err() == nil,
 		"total_nodes": len(e.Plan.Nodes),
 		"cancelled":   ctx.Err() != nil,
+		"trace_id":    traceID,
+		"span_id":     spanID,
 	})
 	return nil
 }

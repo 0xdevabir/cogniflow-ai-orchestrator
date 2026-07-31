@@ -1,0 +1,20 @@
+apiVersion: v2
+name: cogniflow
+description: |
+  CogniFlow — autonomous multi-model AI orchestration. Helm chart deploys
+  the Go orchestrator + Next.js web (and optionally the Python ml-gateway)
+  with sensible production defaults (probes, resource limits, ingress, HPA).
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+home: https://github.com/cogniflow/cogniflow-ai-orchestrator
+keywords:
+  - ai
+  - orchestration
+  - sse
+  - rag
+  - multi-model
+maintainers:
+  - name: CogniFlow maintainers
+sources:
+  - https://github.com/cogniflow/cogniflow-ai-orchestrator

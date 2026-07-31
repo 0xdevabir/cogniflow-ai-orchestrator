@@ -78,11 +78,14 @@
 - **Build spec:** [`build-specs/phase-6-rag.md`](build-specs/phase-6-rag.md)
 
 ## Phase 7 — Eval + Cost/Carbon Budget  *(1 day)*
-- [ ] Faithfulness LLM-judge
-- [ ] Cost + carbon estimator + cascade downgrade
-- [ ] `EvalBadge` in UI
-- [ ] Settings page
-- **Demo:** Set budget $0.10, big request cascades to cheap models.
+- [x] `internal/budget` estimator with per-model `Projection` (cost_usd, carbon_g) and `PlanDowngrade` cascade
+- [x] `internal/eval` faithfulness judge (LLM-as-judge with heuristic fallback) — emits `faithfulness_pct`, `uncited_claims`, `conflicts`, `cost_usd`, `carbon_g`, `latency_total_ms`, `model_mix`, `per_node`
+- [x] `Estimator` + `Budget` + `Judge` wired into DAG executor; emits `downgrade` + `eval` SSE events with timing breakdown per node
+- [x] `runRequest.Budget` + `Eval` fields on `/v1/run`; judge is on by default, toggle with `{"eval": false}`
+- [x] API tests `TestHandleRun_BudgetTriggersDowngrade` (stub router forces cascade) + `TestHandleRun_EvalDisabled` (no `eval` event when off)
+- [x] Web side: `BudgetSettings` (cost + carbon caps, persisted in localStorage), `EvalBadge` (faithfulness %, cost, carbon, latency, model mix, uncited claims, downgrade banner), threaded through `MultiStreamPanel` + `FusionRunner` + playground page
+- [x] Cost table loaded at startup; identical pricing used by router + estimator
+- **Demo:** Set `max_cost_usd` tight → `downgrade` event swaps `opus → sonnet → mini → mock`; run completes; `eval` event shows faithfulness %, hallucination flags, model mix, savings.
 - **Build spec:** [`build-specs/phase-7-eval-budget.md`](build-specs/phase-7-eval-budget.md)
 
 ## Phase 8 — Production polish  *(3–4 days, cherry-pick)*
