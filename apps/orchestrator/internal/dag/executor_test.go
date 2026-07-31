@@ -10,7 +10,9 @@ import (
 	"time"
 
 	"github.com/cogniflow/orchestrator/internal/decomposer"
+	"github.com/cogniflow/orchestrator/internal/fusion"
 	"github.com/cogniflow/orchestrator/internal/providers"
+	"github.com/cogniflow/orchestrator/internal/rag"
 	"github.com/cogniflow/orchestrator/internal/router"
 )
 
@@ -511,3 +513,192 @@ func TestBuildPrompt(t *testing.T) {
 
 // Ensure fmt is referenced (avoids unused import in some build modes).
 var _ = fmt.Sprintf
+
+// --- Phase 5: fusion integration tests ---
+
+func TestExecutor_InvokesFuserAndEmitsManifest(t *testing.T) {
+	plan := newPlan(t,
+		node("n1", "", "first output"),
+		node("n2", "", "second output"),
+		node("n3", "n1", "depends on n1"),
+	)
+	reg := providers.NewRegistry(nil)
+	sink := &recordingSink{}
+	exec := New(plan, nil, reg, sink)
+	exec.Parallelism = 4
+	exec.Fuser = stubFuser{text: "FUSED ANSWER with [1] and [2]"}
+
+	if err := exec.Run(context.Background()); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	// Find a fusion_start event.
+	var sawFusionStart, sawFusionChunk, sawManifest bool
+	for _, e := range sink.all() {
+		switch e.Event {
+		case "fusion_start":
+			sawFusionStart = true
+		case "fusion":
+			sawFusionChunk = true
+		case "manifest":
+			sawManifest = true
+		}
+	}
+	if !sawFusionStart {
+		t.Error("missing fusion_start event")
+	}
+	if !sawFusionChunk {
+		t.Error("missing fusion chunk event")
+	}
+	if !sawManifest {
+		t.Error("missing manifest event")
+	}
+}
+
+func TestExecutor_NoFuserStillWorks(t *testing.T) {
+	plan := newPlan(t, node("n1", "", "x"))
+	sink := &recordingSink{}
+	exec := New(plan, nil, providers.NewRegistry(nil), sink)
+	if err := exec.Run(context.Background()); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	for _, e := range sink.all() {
+		if e.Event == "fusion_start" || e.Event == "manifest" {
+			t.Errorf("unexpected fusion event when Fuser is nil: %v", e)
+		}
+	}
+}
+
+// stubFuser is a test Fuser that emits a single chunk + finish.
+type stubFuser struct{ text string }
+
+func (s stubFuser) Fuse(ctx context.Context, fr fusion.FusionRequest, sink providers.ChunkSink) error {
+	_ = sink.Send(ctx, providers.Chunk{
+		V: "chunk.v1", StreamID: "fusion", Model: "stub",
+		Text: s.text,
+	})
+	return sink.Send(ctx, providers.Chunk{
+		V: "chunk.v1", StreamID: "fusion", Model: "stub", Finish: true,
+	})
+}
+
+// --- Phase 6: RAG injection ---
+
+// ragCap captures the SystemMsg passed to the streamer so the test can
+// assert on the injected DOC markers.
+type ragCap struct {
+	mu        sync.Mutex
+	systemMsg string
+	prompt    string
+}
+
+func (r *ragCap) capture(prompt, systemMsg string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.prompt = prompt
+	r.systemMsg = systemMsg
+}
+
+func TestExecutor_RAGInjectsDocsIntoSystemMsg(t *testing.T) {
+	store := rag.NewMemStore()
+	_ = store.UpsertDoc(context.Background(), rag.Document{
+		ID: "doc_legal", WorkspaceID: "ws1", Title: "NDA",
+	})
+	_ = store.UpsertChunks(context.Background(), []rag.Chunk{
+		{ID: "c1", DocID: "doc_legal", WorkspaceID: "ws1",
+			Text: "the terminating party shall provide thirty days notice", CharStart: 0, CharEnd: 60},
+	})
+	svc := rag.NewService(store, nil)
+
+	plan := newPlan(t, node("n1", "", "What is the termination clause?"))
+	plan.Nodes[0].NeedsRAG = true
+
+	cap := &ragCap{}
+	reg := &captureRegistry{capture: func(prompt string) {
+		// We need the SystemMsg too; reuse the streamer below.
+	}}
+	// Replace the underlying streamer with one that captures both.
+	reg2 := ragRegistryWithCapture(cap)
+	_ = reg
+
+	sink := &recordingSink{}
+	exec := New(plan, nil, reg2, sink)
+	exec.RAG = svc
+	exec.WorkspaceID = "ws1"
+	if err := exec.Run(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	cap.mu.Lock()
+	defer cap.mu.Unlock()
+	if cap.systemMsg == "" {
+		t.Fatal("expected non-empty system message")
+	}
+	if !strings.Contains(cap.systemMsg, "===DOC 1") {
+		t.Fatalf("expected ===DOC 1 marker, got %q", cap.systemMsg)
+	}
+	if !strings.Contains(cap.systemMsg, "doc_legal") {
+		t.Fatalf("expected doc_legal in system msg, got %q", cap.systemMsg)
+	}
+}
+
+func TestExecutor_NoRAGLeavesSystemMsgAlone(t *testing.T) {
+	plan := newPlan(t, node("n1", "", "no rag"))
+	plan.Nodes[0].NeedsRAG = false
+	cap := &ragCap{}
+	reg := ragRegistryWithCapture(cap)
+	exec := New(plan, nil, reg, &recordingSink{})
+	exec.RAG = rag.NewService(rag.NewMemStore(), nil)
+	if err := exec.Run(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	cap.mu.Lock()
+	defer cap.mu.Unlock()
+	if strings.Contains(cap.systemMsg, "===DOC ") {
+		t.Fatalf("expected no DOC marker when NeedsRAG=false, got %q", cap.systemMsg)
+	}
+}
+
+func TestExecutor_RAGRetrievalFailureIsNonFatal(t *testing.T) {
+	plan := newPlan(t, node("n1", "", "what about X?"))
+	plan.Nodes[0].NeedsRAG = true
+	cap := &ragCap{}
+	reg := ragRegistryWithCapture(cap)
+	exec := New(plan, nil, reg, &recordingSink{})
+	exec.RAG = rag.NewService(rag.NewMemStore(), nil)
+	if err := exec.Run(context.Background()); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	cap.mu.Lock()
+	defer cap.mu.Unlock()
+	if strings.Contains(cap.systemMsg, "===DOC ") {
+		t.Fatalf("expected no DOC marker when retrieval returns no results, got %q", cap.systemMsg)
+	}
+}
+
+// ragRegistryWithCapture returns a registry whose streamer captures both
+// the prompt and the system message into the given recorder.
+func ragRegistryWithCapture(rec *ragCap) providers.Registry {
+	return &ragCaptureRegistry{rec: rec}
+}
+
+type ragCaptureRegistry struct{ rec *ragCap }
+
+func (r *ragCaptureRegistry) Get(_ string) (providers.Streamer, error) {
+	return &ragCaptureStreamer{rec: r.rec}, nil
+}
+func (r *ragCaptureRegistry) List() []string { return []string{"mock"} }
+
+type ragCaptureStreamer struct{ rec *ragCap }
+
+func (r *ragCaptureStreamer) Name() string { return "mock" }
+func (r *ragCaptureStreamer) Stream(ctx context.Context, req providers.Request, sink providers.ChunkSink) error {
+	r.rec.capture(req.Prompt, req.SystemMsg)
+	_ = sink.Send(ctx, providers.Chunk{
+		V: "chunk.v1", StreamID: req.StreamID, NodeID: req.NodeID,
+		Model: req.Model, Text: "ok",
+	})
+	return sink.Send(ctx, providers.Chunk{
+		V: "chunk.v1", StreamID: req.StreamID, NodeID: req.NodeID,
+		Model: req.Model, Finish: true,
+	})
+}

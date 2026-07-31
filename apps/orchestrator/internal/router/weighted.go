@@ -27,6 +27,13 @@ func DefaultWeights() Weights {
 	return Weights{Bench: 0.45, Cost: 0.30, Latency: 0.25}
 }
 
+// SetWeights installs a new per-task-class weight map on an already-built
+// router. Used by main.go to apply the bandit-learn recommendation at
+// startup without rebuilding the router.
+func (w *WeightedRouter) SetWeights(m map[decomposer.TaskClass]Weights) {
+	w.cfg.Weights = m
+}
+
 // WeightedConfig is the construction-time config for WeightedRouter.
 type WeightedConfig struct {
 	Bench         *Benchmarks

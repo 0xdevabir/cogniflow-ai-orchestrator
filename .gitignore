@@ -2,6 +2,7 @@
 apps/orchestrator/bin/
 apps/orchestrator/coverage.out
 apps/orchestrator/data/*.jsonl
+apps/orchestrator/data/*.json
 
 # --- Python ---
 apps/ml-gateway/.venv/

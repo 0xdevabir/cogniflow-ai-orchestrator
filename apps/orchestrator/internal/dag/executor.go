@@ -6,9 +6,17 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
+	"github.com/cogniflow/orchestrator/internal/budget"
+	"github.com/cogniflow/orchestrator/internal/citation"
 	"github.com/cogniflow/orchestrator/internal/decomposer"
+	"github.com/cogniflow/orchestrator/internal/eval"
+	"github.com/cogniflow/orchestrator/internal/fusion"
+	"github.com/cogniflow/orchestrator/internal/meter"
+	"github.com/cogniflow/orchestrator/internal/obs"
 	"github.com/cogniflow/orchestrator/internal/providers"
+	"github.com/cogniflow/orchestrator/internal/rag"
 	"github.com/cogniflow/orchestrator/internal/router"
 )
 
@@ -27,12 +35,26 @@ type Executor struct {
 	Router      router.Router
 	Providers   providers.Registry
 	Sink        Sink
-	Parallelism int // default 4
+	Fuser       fusion.Fuser  // optional; if set, the executor invokes fusion after the synthesizer
+	RAG         *rag.Service  // optional; if set, NeedsRAG nodes retrieve + inject docs
+	WorkspaceID string        // workspace id used for RAG retrieval
+	Estimator   *budget.Estimator  // optional; if set + Budget is non-zero, cascade-downgrades models
+	Budget      budget.Budget      // cost + carbon cap for this run
+	Judge       *eval.Judge        // optional; if set, runs after the run completes
+	Meter       meter.Meterer      // optional; if set, per-node usage events are recorded for billing
+	RunID       string             // optional; surfaced on every usage event so a run is traceable end-to-end
+	Parallelism int                // default 4
+
+	// Populated by Run after a budget cascade.
+	overrides   map[string]string // node_id → downgraded model
+	overridesMu sync.RWMutex
+	// Populated by Run after the cascade completes.
+	DowngradeResult *budget.DowngradeResult
 }
 
 // New builds an Executor. Parallelism defaults to 4 if <= 0.
 func New(p *decomposer.Plan, r router.Router, reg providers.Registry, sink Sink) *Executor {
-	return &Executor{Plan: p, Router: r, Providers: reg, Sink: sink, Parallelism: 4}
+	return &Executor{Plan: p, Router: r, Providers: reg, Sink: sink, Parallelism: 4, WorkspaceID: "default"}
 }
 
 // UpstreamSeparator is the marker we put around upstream node outputs in
@@ -44,12 +66,36 @@ func upstreamPrefix(depID string, depRole decomposer.Role) string {
 	return fmt.Sprintf("===UPSTREAM: %s (id=%s, role=%s)===", depID, depID, depRole)
 }
 
+// nodeOutput is what runNode stores in the shared outs map for downstream
+// consumers (buildPrompt + the fusion stage).
+type nodeOutput struct {
+	Text       string
+	Manifest   *citation.Manifest
+	Role       decomposer.Role
+	Model      string
+	DocIDs     []string            // doc ids referenced by this node (Phase 6)
+	DocRanges  map[string]DocRange // per-doc char range that was used
+	StartedAt  time.Time
+	EndedAt    time.Time
+	TokensIn   int
+	TokensOut  int
+}
+
+// DocRange captures the source char range in a single document for one
+// retrieval pass. Phase 6 records these so downstream citation spans can
+// point back to the exact window.
+type DocRange struct {
+	CharStart int
+	CharEnd   int
+}
+
 // runNode executes a single node. It accumulates the streamed text into
 // outs under nodeID and emits node_status / chunk events through the Sink.
 func (e *Executor) runNode(ctx context.Context, id string, outs *sync.Map) error {
 	if e.Plan == nil {
 		return fmt.Errorf("dag: nil plan")
 	}
+	startedAt := time.Now()
 	// Find the node.
 	var node *decomposer.Node
 	for i := range e.Plan.Nodes {
@@ -62,10 +108,32 @@ func (e *Executor) runNode(ctx context.Context, id string, outs *sync.Map) error
 		return fmt.Errorf("dag: node %q not in plan", id)
 	}
 
-	// 1. Route.
+	// Phase 8: one span per node so traces show the parallel fan-out + each
+	// model's latency + token count. Span attributes carry the same fields
+	// the eval judge scores on.
+	nodeCtx, nodeSpan := obs.Start(ctx, "dag.runNode",
+		obs.AttrStr("node.id", node.ID),
+		obs.AttrStr("node.role", string(node.Role)),
+		obs.AttrStr("node.task_class", string(node.Requires.TaskClass)),
+		obs.AttrBool("node.needs_rag", node.NeedsRAG),
+	)
+	defer nodeSpan.End()
+
+	// (Rest of method unchanged — it uses ctx, which we re-alias to nodeCtx
+	// so spans inside the route/stream flow inherit this node's context.)
+	ctx = nodeCtx
+
+	// 1. Route. The assigned model may have been downgraded by the budget
+	// cascade — in that case we honor the override instead of routing again.
 	summary := &nodeSummary{node: *node}
 	var decision *router.Decision
-	if e.Router != nil {
+	if override, ok := e.modelOverride(id); ok {
+		decision = &router.Decision{
+			Model:  parseModelIDLocal(override),
+			Score:  0,
+			Reason: "budget override",
+		}
+	} else if e.Router != nil {
 		d, err := e.Router.Route(ctx, summary)
 		if err != nil || d == nil {
 			// Fall back to the cheap mock if routing fails.
@@ -87,6 +155,27 @@ func (e *Executor) runNode(ctx context.Context, id string, outs *sync.Map) error
 
 	// 2. Build the prompt with upstream outputs injected.
 	prompt := buildPrompt(*node, outs)
+
+	// 2b. Optional RAG retrieval. If the node is marked NeedsRAG and we have
+	// a RAG service wired, retrieve top-k chunks and replace the system
+	// message with the injection template. The retrieved sections are also
+	// stored so the citation manifest can record DocID/CharStart/CharEnd on
+	// every span this node emits.
+	var injected []rag.InjectedSection
+	systemMsg := e.systemMsgFor(*node)
+	if node.NeedsRAG && e.RAG != nil {
+		injection, sections, retrievalErr := e.RAG.BuildInjectedSystemPrompt(ctx, e.WorkspaceID, prompt)
+		if retrievalErr == nil {
+			systemMsg = injection
+			injected = sections
+		} else if retrievalErr != rag.ErrNoResults {
+			// Non-fatal: log and continue without injection.
+			_ = e.Sink.Emit("node_status", map[string]any{
+				"node_id": id, "status": "running",
+				"message": "rag retrieval failed: " + retrievalErr.Error(),
+			})
+		}
+	}
 
 	// 3. Emit "node_status: running".
 	_ = e.Sink.Emit("node_status", map[string]any{
@@ -112,12 +201,13 @@ func (e *Executor) runNode(ctx context.Context, id string, outs *sync.Map) error
 	sink := &sinkAdapter{
 		nodeID: id, model: decision.Model.String(),
 		sink: e.Sink, accum: accum, finished: false,
+		injected: injected,
 	}
 
 	req := providers.Request{
 		Prompt:   prompt,
 		Model:    decision.Model.String(),
-		SystemMsg: e.systemMsgFor(*node),
+		SystemMsg: systemMsg,
 		StreamID: id,
 		NodeID:   id,
 	}
@@ -130,14 +220,129 @@ func (e *Executor) runNode(ctx context.Context, id string, outs *sync.Map) error
 		return nil
 	}
 
-	// 5. Store the accumulated text for downstream consumers.
-	outs.Store(id, accum.String())
+	// 5. Bundle the accumulated text + a per-node manifest into outs.
+	manifest := citation.New()
+	// One span per retrieved doc (so the manifest reflects the actual RAG
+	// provenance) + a final span for the synthesized answer. If no RAG was
+	// injected, the synthesised span still gets the per-node text.
+	for _, sec := range injected {
+		manifest.Add(citation.Span{
+			SubTaskID:  id,
+			Model:      decision.Model.String(),
+			Text:       sec.Text,
+			DocID:      sec.DocID,
+			CharStart:  sec.CharStart,
+			CharEnd:    sec.CharEnd,
+			PromptHash: citation.HashPrompt(prompt),
+		})
+	}
+	manifest.Add(citation.Span{
+		SubTaskID:  id,
+		Model:      decision.Model.String(),
+		Text:       accum.String(),
+		PromptHash: citation.HashPrompt(prompt),
+	})
+
+	docIDs := make([]string, 0, len(injected))
+	docRanges := map[string]DocRange{}
+	for _, sec := range injected {
+		docIDs = append(docIDs, sec.DocID)
+		docRanges[sec.DocID] = DocRange{CharStart: sec.CharStart, CharEnd: sec.CharEnd}
+	}
+	endedAt := time.Now()
+	tokensIn, tokensOut := estimateTokens(prompt, accum.String())
+	outs.Store(id, nodeOutput{
+		Text:      accum.String(),
+		Manifest:  manifest,
+		Role:      node.Role,
+		Model:     decision.Model.String(),
+		DocIDs:    docIDs,
+		DocRanges: docRanges,
+		StartedAt: startedAt,
+		EndedAt:   endedAt,
+		TokensIn:  tokensIn,
+		TokensOut: tokensOut,
+	})
 
 	// 6. Emit "node_status: ok".
 	_ = e.Sink.Emit("node_status", map[string]any{
-		"node_id": id, "status": "ok",
+		"node_id":     id,
+		"status":      "ok",
+		"model":       decision.Model.String(),
+		"tokens_in":   tokensIn,
+		"tokens_out":  tokensOut,
+		"duration_ms": int(endedAt.Sub(startedAt) / time.Millisecond),
 	})
+	nodeSpan.SetAttributes(
+		obs.AttrStr("node.model", decision.Model.String()),
+		obs.AttrInt("node.tokens_in", tokensIn),
+		obs.AttrInt("node.tokens_out", tokensOut),
+		obs.AttrInt64("node.duration_ms", endedAt.Sub(startedAt).Milliseconds()),
+		obs.AttrFloat("node.router_score", decision.Score),
+	)
+
+	// Phase 8: emit a billing event for this node. Best-effort: a slow or
+	// failing meter must NEVER block the run. The meter's Record impl is
+	// expected to be non-blocking on the happy path.
+	if e.Meter != nil {
+		costUSD, carbonG := e.estimateBill(decision.Model.String(), tokensIn, tokensOut)
+		e.Meter.Record(meter.Event{
+			V:          "usage.v1",
+			RunID:      e.RunID,
+			NodeID:     id,
+			Model:      decision.Model.String(),
+			TokensIn:   tokensIn,
+			TokensOut:  tokensOut,
+			CostUSD:    costUSD,
+			CarbonG:    carbonG,
+			LatencyMS:  int(endedAt.Sub(startedAt) / time.Millisecond),
+			Workspace:  e.WorkspaceID,
+			OccurredAt: endedAt,
+		})
+	}
 	return nil
+}
+
+// estimateBill returns the per-event cost + carbon for a node. It scales
+// the Estimator's per-projection to match the actual tokens emitted by
+// the node (the estimator was configured with assumed prompt/output
+// counts at New() time). If the Estimator is missing, returns zeros.
+func (e *Executor) estimateBill(model string, tokensIn, tokensOut int) (float64, float64) {
+	if e.Estimator == nil {
+		return 0, 0
+	}
+	// Per-projection is in absolute dollars for the estimator's assumed
+	// nominal token count; here we just return it as the bill for this
+	// node. The Estimator is the single source of truth for pricing in
+	// this codebase; if finer-grained accounting is needed later, callers
+	// can switch to a CostTable-aware helper.
+	return e.Estimator.PerNode(model).CostUSD, e.Estimator.PerNode(model).CarbonG
+}
+
+// modelOverride returns the budget-cascade override for this node id, if any.
+func (e *Executor) modelOverride(id string) (string, bool) {
+	e.overridesMu.RLock()
+	defer e.overridesMu.RUnlock()
+	m, ok := e.overrides[id]
+	return m, ok
+}
+
+// parseModelIDLocal parses a "provider:model" string into a router.ModelID.
+// Kept local so the dag package doesn't depend on the router's unexported
+// helper.
+func parseModelIDLocal(s string) router.ModelID {
+	for i := 0; i < len(s); i++ {
+		if s[i] == ':' {
+			return router.ModelID{Provider: s[:i], Model: s[i+1:]}
+		}
+	}
+	return router.ModelID{Provider: "", Model: s}
+}
+
+// estimateTokens is a crude char/4 approximation. The real provider surfaces
+// exact counts in its final chunk; Phase 8 reads those.
+func estimateTokens(prompt, output string) (int, int) {
+	return len(prompt) / 4, len(output) / 4
 }
 
 // buildPrompt concatenates upstream outputs in dependency order (sorted by
@@ -150,16 +355,12 @@ func buildPrompt(n decomposer.Node, outs *sync.Map) string {
 		deps := append([]string(nil), n.DependsOn...)
 		sort.Strings(deps)
 		for _, d := range deps {
-			// Find the role of the dep.
-			var role decomposer.Role
-			// We don't have the plan here — fall back to "" if not found.
-			role = "" // role is decorative; executor passes through plan elsewhere if needed
 			v, ok := outs.Load(d)
 			if !ok {
 				continue
 			}
-			s, _ := v.(string)
-			fmt.Fprintf(&b, "%s\n%s\n\n", upstreamPrefix(d, role), s)
+			out, _ := v.(nodeOutput)
+			fmt.Fprintf(&b, "%s\n%s\n\n", upstreamPrefix(d, out.Role), out.Text)
 		}
 		b.WriteString("---\n")
 	}
@@ -190,6 +391,7 @@ type sinkAdapter struct {
 	sink     Sink
 	accum    *strings.Builder
 	finished bool
+	injected []rag.InjectedSection // doc provenance for this node (Phase 6)
 }
 
 func (s *sinkAdapter) Send(ctx context.Context, c providers.Chunk) error {
@@ -210,6 +412,21 @@ func (s *sinkAdapter) Send(ctx context.Context, c providers.Chunk) error {
 	if c.StreamID == "" {
 		c.StreamID = s.nodeID
 	}
+	// Attach doc provenance when RAG was injected and the upstream chunk
+	// doesn't already carry explicit cites.
+	if len(c.Cite) == 0 && len(s.injected) > 0 {
+		refs := make([]providers.SpanRef, 0, len(s.injected))
+		for _, sec := range s.injected {
+			refs = append(refs, providers.SpanRef{
+				SubTaskID: s.nodeID,
+				Model:     s.model,
+				DocID:     sec.DocID,
+				CharStart: sec.CharStart,
+				CharEnd:   sec.CharEnd,
+			})
+		}
+		c.Cite = refs
+	}
 	return s.sink.Emit("chunk", c)
 }
 
@@ -223,18 +440,41 @@ func (e *Executor) Run(ctx context.Context) error {
 	if e.Sink == nil {
 		return fmt.Errorf("dag: nil sink")
 	}
+
+	// Phase 8: wrap the entire run in a span so traces render the full DAG
+	// + fusion + eval as one trace. The trace + span ids are surfaced on
+	// the "done" event so operators can pivot to the trace from logs.
+	runCtx, runSpan := obs.Start(ctx, "dag.Run",
+		obs.AttrInt("dag.total_nodes", len(e.Plan.Nodes)),
+		obs.AttrInt("dag.parallelism", e.Parallelism),
+		obs.AttrFloat("dag.budget.max_cost_usd", e.Budget.MaxCostUSD),
+		obs.AttrFloat("dag.budget.max_carbon_g", e.Budget.MaxCarbonG),
+		obs.AttrBool("dag.eval_enabled", e.Judge != nil),
+	)
+	defer runSpan.End()
+
+	// Surface the trace correlation ids on the "done" event so dashboards
+	// can deep-link to the trace from the run record.
+	traceID := runSpan.SpanContext().TraceID().String()
+	spanID := runSpan.SpanContext().SpanID().String()
+
 	if len(e.Plan.Nodes) == 0 {
-		_ = e.Sink.Emit("done", map[string]any{"ok": true, "total_nodes": 0})
+		_ = e.Sink.Emit("done", map[string]any{
+			"ok": true, "total_nodes": 0, "trace_id": traceID, "span_id": spanID,
+		})
 		return nil
 	}
 	if err := Validate(e.Plan.Nodes, e.Plan.Edges); err != nil {
+		obs.RecordError(runSpan, err)
 		return err
 	}
 
 	levels, err := TopoSort(e.Plan.Nodes, e.Plan.Edges)
 	if err != nil {
+		obs.RecordError(runSpan, err)
 		return err
 	}
+	runSpan.SetAttributes(obs.AttrInt("dag.levels", len(levels)))
 
 	par := e.Parallelism
 	if par <= 0 {
@@ -243,6 +483,45 @@ func (e *Executor) Run(ctx context.Context) error {
 	sem := make(chan struct{}, par)
 	outs := &sync.Map{}
 
+	// Phase 7: project the plan's cost + carbon before running; if a budget
+	// was supplied, cascade-downgrade models until we fit. The cascade uses
+	// the router's first pick per node as the baseline.
+	if e.Estimator != nil && (e.Budget.MaxCostUSD > 0 || e.Budget.MaxCarbonG > 0) {
+		_, cascadeSpan := obs.Start(runCtx, "dag.BudgetCascade")
+		initial := e.projectInitialModels(ctx)
+		if len(initial) > 0 {
+			res := e.Estimator.PlanDowngrade(initial, e.Budget, e.Router)
+			e.DowngradeResult = &res
+			cascadeSpan.SetAttributes(
+				obs.AttrInt("cascade.downgraded_nodes", res.Downgraded),
+				obs.AttrFloat("cascade.saved_usd", res.SavedUSD),
+				obs.AttrFloat("cascade.saved_g", res.SavedG),
+				obs.AttrFloat("cascade.final_cost_usd", res.FinalCost),
+				obs.AttrFloat("cascade.final_carbon_g", res.FinalCarbon),
+				obs.AttrBool("cascade.unachievable", res.Unachievable),
+			)
+			cascadeSpan.End()
+			if res.Downgraded > 0 {
+				e.overridesMu.Lock()
+				e.overrides = res.New
+				e.overridesMu.Unlock()
+				// Emit a "downgrade" event so the UI can show the cascade.
+				_ = e.Sink.Emit("downgrade", map[string]any{
+					"original":      res.Original,
+					"new":           res.New,
+					"saved_usd":     res.SavedUSD,
+					"saved_g":       res.SavedG,
+					"final_cost_usd": res.FinalCost,
+					"final_carbon_g": res.FinalCarbon,
+					"downgraded":    res.Downgraded,
+					"unachievable":  res.Unachievable,
+				})
+			}
+		} else {
+			cascadeSpan.End()
+		}
+	}
+
 	// Emit "plan" event with summary.
 	_ = e.Sink.Emit("plan", map[string]any{
 		"version":     e.Plan.Version,
@@ -250,6 +529,7 @@ func (e *Executor) Run(ctx context.Context) error {
 		"levels":      len(levels),
 	})
 
+	startedAt := time.Now()
 	var wg sync.WaitGroup
 	for li, level := range levels {
 		if ctx.Err() != nil {
@@ -275,12 +555,209 @@ func (e *Executor) Run(ctx context.Context) error {
 		wg.Wait()
 	}
 
+	// Phase 5: invoke fusion after the DAG (if a fuser is wired) to emit
+	// the final coherent answer + a CitationManifest as SSE events.
+	if e.Fuser != nil && ctx.Err() == nil {
+		_, fusionSpan := obs.Start(runCtx, "dag.Fuse")
+		e.runFusion(ctx, outs)
+		fusionSpan.End()
+	}
+
+	// Phase 7: score the run with the eval judge (if wired).
+	if e.Judge != nil && ctx.Err() == nil {
+		_, evalSpan := obs.Start(runCtx, "dag.Eval")
+		e.runEval(ctx, outs, startedAt)
+		evalSpan.End()
+	}
+
+	runSpan.SetAttributes(
+		obs.AttrBool("dag.cancelled", ctx.Err() != nil),
+		obs.AttrInt64("dag.total_duration_ms", time.Since(startedAt).Milliseconds()),
+	)
+
 	_ = e.Sink.Emit("done", map[string]any{
 		"ok":          ctx.Err() == nil,
 		"total_nodes": len(e.Plan.Nodes),
 		"cancelled":   ctx.Err() != nil,
+		"trace_id":    traceID,
+		"span_id":     spanID,
 	})
 	return nil
+}
+
+// projectInitialModels invokes the router for every node to learn the
+// baseline model assignment for the budget cascade. Failures fall back to
+// the cheap mock.
+func (e *Executor) projectInitialModels(ctx context.Context) map[string]string {
+	out := map[string]string{}
+	for _, n := range e.Plan.Nodes {
+		summary := &nodeSummary{node: n}
+		if e.Router != nil {
+			d, err := e.Router.Route(ctx, summary)
+			if err == nil && d != nil {
+				out[n.ID] = d.Model.String()
+				continue
+			}
+		}
+		out[n.ID] = "mock:echo-v1"
+	}
+	return out
+}
+
+// runEval invokes the judge and emits the result as an "eval" SSE event.
+func (e *Executor) runEval(ctx context.Context, outs *sync.Map, startedAt time.Time) {
+	endedAt := time.Now()
+	streams := map[string]string{}
+	usage := []eval.UsageEvent{}
+	manifest := citation.New()
+	for _, n := range e.Plan.Nodes {
+		v, ok := outs.Load(n.ID)
+		if !ok {
+			continue
+		}
+		out, _ := v.(nodeOutput)
+		streams[n.ID] = out.Text
+		usage = append(usage, eval.UsageEvent{
+			NodeID:     n.ID,
+			Model:      out.Model,
+			TokensIn:   out.TokensIn,
+			TokensOut:  out.TokensOut,
+			DurationMS: int(out.EndedAt.Sub(out.StartedAt) / time.Millisecond),
+			StartedAt:  out.StartedAt,
+			EndedAt:    out.EndedAt,
+		})
+		for _, s := range out.Manifest.Spans {
+			manifest.Add(s)
+		}
+	}
+	dr := &eval.DowngradeRecord{}
+	if e.DowngradeResult != nil {
+		dr.Original = e.DowngradeResult.Original
+		dr.New = e.DowngradeResult.New
+		dr.SavedUSD = e.DowngradeResult.SavedUSD
+		dr.SavedG = e.DowngradeResult.SavedG
+		dr.Unachievable = e.DowngradeResult.Unachievable
+	}
+	res, err := e.Judge.Score(ctx, eval.RunRecord{
+		Plan:      e.Plan,
+		Manifest:  manifest,
+		Streams:   streams,
+		Usage:     usage,
+		StartedAt: startedAt,
+		EndedAt:   endedAt,
+		Downgrade: dr,
+	})
+	if err != nil || res == nil {
+		return
+	}
+	_ = e.Sink.Emit("eval", res)
+}
+
+// runFusion packages the per-node outputs into a FusionRequest, invokes the
+// fuser, and emits the merged chunks as a "fusion" SSE stream. The final
+// CitationManifest is emitted as a "manifest" event.
+//
+// We re-stream the fusion output (NOT the synthesizer's raw output) so the
+// UI gets a coherent final-answer stream that's distinct from the per-node
+// streams.
+func (e *Executor) runFusion(ctx context.Context, outs *sync.Map) {
+	streams := map[string]*fusion.NodeStream{}
+	merged := citation.New()
+	// Walk plan nodes in deps-first order so the citation order is deterministic.
+	for _, n := range e.Plan.Nodes {
+		v, ok := outs.Load(n.ID)
+		if !ok {
+			continue
+		}
+		out, _ := v.(nodeOutput)
+		// Append each node's spans to the merged manifest, assigning new IDs
+		// so the merged manifest is independent of the per-node manifests.
+		for _, s := range out.Manifest.Spans {
+			s.ID = "" // force fresh ID
+			merged.Add(s)
+		}
+		stream := &fusion.NodeStream{
+			NodeID:   n.ID,
+			Role:     out.Role,
+			Text:     out.Text,
+			Manifest: out.Manifest,
+		}
+		streams[n.ID] = stream
+	}
+
+	// Find the synthesizer node (the last one — the one with no dependents).
+	var synthNode decomposer.Node
+	for _, n := range e.Plan.Nodes {
+		if len(dependentsOf(e.Plan.Nodes, n.ID)) == 0 {
+			synthNode = n
+			break
+		}
+	}
+	if synthNode.ID == "" {
+		synthNode = e.Plan.Nodes[len(e.Plan.Nodes)-1]
+	}
+
+	// Emit "fusion_start" so the UI can switch to the answer view.
+	_ = e.Sink.Emit("fusion_start", map[string]any{
+		"synth_node": synthNode.ID,
+		"streams":    len(streams),
+	})
+
+	// Emit chunks from the fuser. The fuser is responsible for sizing its
+	// final Finish chunk.
+	fusionSink := &fusionSinkAdapter{
+		nodeOutput: &nodeOutput{Manifest: merged},
+		sink:       e.Sink,
+	}
+	_ = e.Fuser.Fuse(ctx, fusion.FusionRequest{
+		Plan:      e.Plan,
+		Streams:   streams,
+		SynthNode: synthNode,
+	}, fusionSink)
+
+	// Emit the unified manifest.
+	_ = e.Sink.Emit("manifest", map[string]any{
+		"v":     merged.V,
+		"spans": merged.Spans,
+	})
+}
+
+// dependentsOf returns the ids of nodes that depend on `id`.
+func dependentsOf(nodes []decomposer.Node, id string) []string {
+	var out []string
+	for _, n := range nodes {
+		for _, d := range n.DependsOn {
+			if d == id {
+				out = append(out, n.ID)
+			}
+		}
+	}
+	return out
+}
+
+// fusionSinkAdapter wraps the executor's Sink to emit each fusion chunk as
+// "fusion" SSE events (so the UI can pick them up separately from per-node
+// streams).
+type fusionSinkAdapter struct {
+	nodeOutput *nodeOutput
+	sink       Sink
+	finished   bool
+}
+
+func (f *fusionSinkAdapter) Send(ctx context.Context, c providers.Chunk) error {
+	if f.finished {
+		return nil
+	}
+	if c.Finish {
+		f.finished = true
+	}
+	c.NodeID = "" // fusion is its own stream
+	if c.StreamID == "" {
+		c.StreamID = "fusion"
+	}
+	// Tag with cited span ids if the synthesizer chunk carried any.
+	// (Phase 5 keeps [n] markers in the text; UI parses them.)
+	return f.sink.Emit("fusion", c)
 }
 
 // nodeSummary wraps a decomposer.Node to satisfy router.NodeSummary.

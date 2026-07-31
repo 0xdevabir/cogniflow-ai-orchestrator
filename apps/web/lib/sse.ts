@@ -44,14 +44,99 @@ export type PlanEvent = {
   levels: number;
 };
 
+export type FusionStartEvent = {
+  synth_node: string;
+  streams: number;
+};
+
+export type VerdictEvent = {
+  node_a: string;
+  node_b: string;
+  verdict: "A" | "B" | "tie";
+  confidence: number;
+  reasoning: string;
+  winners: string[];
+  claim_a?: string;
+  claim_b?: string;
+  model_a?: string;
+  model_b?: string;
+};
+
+export type Span = {
+  id: string;
+  sub_task_id: string;
+  model: string;
+  text: string;
+  doc_id?: string;
+  doc_snippet?: string;
+  prompt_hash?: string;
+  char_start?: number;
+  char_end?: number;
+};
+
+export type ManifestEvent = {
+  v: "citation.v1";
+  spans: Span[];
+};
+
 export type ChatDone = { ok: boolean; node_id?: string };
 export type RunDone = { ok: boolean; total_nodes: number; cancelled: boolean };
 export type ChatError = { message: string; code?: string };
+
+// Phase 7: budget cascade event. The planner projected the initial cost
+// against the per-run budget and cascade-downgraded some node models to
+// cheaper alternatives. The original/new maps are node_id → model string.
+export type DowngradeEvent = {
+  original: Record<string, string>;
+  new: Record<string, string>;
+  saved_usd: number;
+  saved_g: number;
+  final_cost_usd: number;
+  final_carbon_g: number;
+  downgraded: number;
+  unachievable: boolean;
+};
+
+// Phase 7: judge output. Faithfulness is 0–100; uncited/conflicts are
+// lists of claims the judge couldn't tie back to a citation span.
+export type EvalEvent = {
+  faithfulness_pct: number;
+  uncited_claims: string[];
+  conflicts: string[];
+  reasoning: string;
+  judged_by?: string;
+  hallucination_flags?: number;
+  cost_usd?: number;
+  carbon_g?: number;
+  latency_total_ms?: number;
+  latency_p95_ms?: number;
+  model_mix?: string[];
+  per_node?: Record<
+    string,
+    {
+      model: string;
+      cost_usd: number;
+      carbon_g: number;
+      latency_ms: number;
+      tokens_in: number;
+      tokens_out: number;
+      downgraded_from?: string;
+    }
+  >;
+  downgraded?: number;
+  unachievable?: boolean;
+};
 
 export type SSEEvent =
   | { event: "plan"; data: PlanEvent }
   | { event: "node_status"; data: NodeStatusEvent }
   | { event: "chunk"; data: Chunk }
+  | { event: "fusion_start"; data: FusionStartEvent }
+  | { event: "fusion"; data: Chunk }
+  | { event: "verdict"; data: VerdictEvent }
+  | { event: "manifest"; data: ManifestEvent }
+  | { event: "downgrade"; data: DowngradeEvent }
+  | { event: "eval"; data: EvalEvent }
   | { event: "done"; data: ChatDone | RunDone }
   | { event: "error"; data: ChatError };
 
@@ -66,6 +151,9 @@ export type StreamRunOpts = {
   apiBase?: string;
   signal?: AbortSignal;
   parallelism?: number;
+  workspace?: string;
+  budget?: { max_cost_usd?: number; max_carbon_g?: number };
+  eval?: boolean;
 };
 
 import type { Plan } from "@/components/DAGCanvas";
@@ -112,13 +200,27 @@ export async function* streamRun(
   const apiBase = opts.apiBase ?? "/api";
 
   const url = `${apiBase}/run`;
+  const body: Record<string, any> = {
+    plan,
+    parallelism: opts.parallelism ?? 4,
+  };
+  if (opts.workspace) body.workspace = opts.workspace;
+  if (opts.budget) {
+    const b: Record<string, number> = {};
+    if (typeof opts.budget.max_cost_usd === "number")
+      b.max_cost_usd = opts.budget.max_cost_usd;
+    if (typeof opts.budget.max_carbon_g === "number")
+      b.max_carbon_g = opts.budget.max_carbon_g;
+    if (Object.keys(b).length > 0) body.budget = b;
+  }
+  if (typeof opts.eval === "boolean") body.eval = opts.eval;
   const res = await fetch(url, {
     method: "POST",
     headers: {
       "content-type": "application/json",
       accept: "text/event-stream",
     },
-    body: JSON.stringify({ plan, parallelism: opts.parallelism ?? 4 }),
+    body: JSON.stringify(body),
     signal: opts.signal,
   });
 
@@ -192,6 +294,18 @@ function parseSSEBlock(block: string): SSEEvent | null {
       return { event: "node_status", data: parsed as NodeStatusEvent };
     case "chunk":
       return { event: "chunk", data: parsed as Chunk };
+    case "fusion_start":
+      return { event: "fusion_start", data: parsed as FusionStartEvent };
+    case "fusion":
+      return { event: "fusion", data: parsed as Chunk };
+    case "verdict":
+      return { event: "verdict", data: parsed as VerdictEvent };
+    case "manifest":
+      return { event: "manifest", data: parsed as ManifestEvent };
+    case "downgrade":
+      return { event: "downgrade", data: parsed as DowngradeEvent };
+    case "eval":
+      return { event: "eval", data: parsed as EvalEvent };
     case "done":
       return { event: "done", data: parsed as ChatDone | RunDone };
     case "error":

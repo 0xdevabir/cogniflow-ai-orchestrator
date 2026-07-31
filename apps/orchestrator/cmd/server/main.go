@@ -5,6 +5,7 @@
 // Phase 2: wires the Decomposer + /v1/plan JSON endpoint.
 // Phase 3: wires the Router (weighted heuristic + bandit logger) and
 // attaches per-node routing decisions to /v1/plan.
+// Phase 8: wires OpenTelemetry traces (OTLP/stdout/none via OTEL_EXPORTER).
 package main
 
 import (
@@ -18,7 +19,11 @@ import (
 
 	"github.com/cogniflow/orchestrator/internal/api"
 	"github.com/cogniflow/orchestrator/internal/decomposer"
+	"github.com/cogniflow/orchestrator/internal/entity"
+	"github.com/cogniflow/orchestrator/internal/meter"
+	"github.com/cogniflow/orchestrator/internal/obs"
 	"github.com/cogniflow/orchestrator/internal/providers"
+	"github.com/cogniflow/orchestrator/internal/rag"
 	"github.com/cogniflow/orchestrator/internal/router"
 )
 
@@ -26,6 +31,22 @@ func main() {
 	addr := os.Getenv("ORCH_PORT")
 	if addr == "" {
 		addr = ":8080"
+	}
+
+	// Phase 8: OpenTelemetry. Default = stdout (great for dev); set
+	// OTEL_EXPORTER=otlp to ship to a real collector, OTEL_EXPORTER=none
+	// to disable. The shutdown hook flushes spans on SIGTERM.
+	otelShutdown, err := obs.Init(context.Background(), "cogniflow-orchestrator", os.Getenv("OTEL_EXPORTER"))
+	if err != nil {
+		log.Printf("obs: init failed: %v (telemetry disabled)", err)
+	} else {
+		defer func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+			if err := otelShutdown(ctx); err != nil {
+				log.Printf("obs: shutdown: %v", err)
+			}
+		}()
 	}
 
 	// Build the model provider registry from env.
@@ -84,24 +105,68 @@ func main() {
 			log.Printf("router: failed to build router: %v (router disabled)", err)
 		} else {
 			rtr = r
+			// Phase 8: optionally apply the bandit-learn recommendation.
+			// Set ROUTER_RECOMMENDATION=./data/recommendation.json to
+			// enable. The file is rewritten by `cmd/bandit-learn` from
+			// the JSONL log.
+			if recPath := os.Getenv("ROUTER_RECOMMENDATION"); recPath != "" {
+				routerWeights, err := router.LoadRecommendation(recPath, nil)
+				if err != nil {
+					log.Printf("router: recommendation load failed: %v", err)
+				} else if len(routerWeights) > 0 {
+					r.SetWeights(routerWeights)
+					log.Printf("router: applied recommendation from %s (%d classes)", recPath, len(routerWeights))
+				}
+			}
 		}
 	}
 
 	srv := &api.Server{
-		Registry:   reg,
-		Decomposer: decomp,
-		Router:     rtr,
+		Registry:    reg,
+		Decomposer:  decomp,
+		Router:      rtr,
+		EntityStore: entity.NoopStore{},
 	}
+
+	// Phase 7: load the cost table so the budget cascade + eval can price runs.
+	if costs, err := router.LoadCostTable(); err == nil {
+		srv.CostTable = costs
+	} else {
+		log.Printf("budget: failed to load cost table: %v (cascade disabled)", err)
+	}
+
+	// Build the RAG service. The default store is the in-memory store so
+	// the demo works without Postgres; ORCH_DATABASE_URL switches to pgvector
+	// in Phase 8. The OpenAI embedder requires OPENAI_API_KEY; without it we
+	// fall back to a lexical-only retriever (good enough for the playground).
+	var ragSvc *rag.Service
+	if openaiKey := os.Getenv("OPENAI_API_KEY"); openaiKey != "" {
+		emb := rag.NewOpenAIEmbedder(openaiKey, "text-embedding-3-small")
+		ragSvc = rag.NewService(rag.NewMemStore(), emb)
+	} else {
+		log.Printf("rag: OPENAI_API_KEY not set → using lexical-only retriever")
+		ragSvc = rag.NewService(rag.NewMemStore(), nil)
+	}
+	srv.RAG = ragSvc
+
+	// Build the meter. Order of preference:
+	//   1. STRIPE_API_KEY + STRIPE_METER_ID → StripeMeterer
+	//   2. METER_LOG path                     → JSONLMeterer
+	//   3. nothing configured                 → NoopMeterer (dev default)
+	meterer := buildMeter()
+	srv.Meter = meterer
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", srv.HandleHealthz)
 	mux.HandleFunc("/v1/chat", srv.HandleChat)
 	mux.HandleFunc("/v1/plan", srv.HandlePlan)
 	mux.HandleFunc("/v1/run", srv.HandleRun)
+	mux.HandleFunc("/v1/docs", srv.HandleDocsRoute)
+	mux.HandleFunc("/v1/docs/", srv.HandleDocsRoute)
 
 	httpServer := &http.Server{
 		Addr:              addr,
-		Handler:           mux,
+		Handler:           obs.HTTPMiddleware(mux),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 
@@ -121,4 +186,25 @@ func main() {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	_ = httpServer.Shutdown(ctx)
+}
+
+// buildMeter picks the right Meterer implementation based on env vars.
+// Order: Stripe (if keys set) > JSONL log file > NoopMeterer.
+func buildMeter() meter.Meterer {
+	if m := meter.StripeMetererFromEnv(); m != nil {
+		if _, ok := m.(meter.NoopMeterer); !ok {
+			log.Printf("meter: Stripe enabled")
+			return m
+		}
+	}
+	if logPath := os.Getenv("METER_LOG"); logPath != "" {
+		jl, err := meter.NewJSONLMeterer(logPath)
+		if err != nil {
+			log.Printf("meter: failed to open log %s: %v", logPath, err)
+		} else {
+			log.Printf("meter: JSONL log → %s", logPath)
+			return jl
+		}
+	}
+	return meter.NoopMeterer{}
 }

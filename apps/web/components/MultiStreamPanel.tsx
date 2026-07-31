@@ -4,6 +4,8 @@ import { useEffect, useRef, useState } from "react";
 import {
   streamRun,
   type Chunk,
+  type DowngradeEvent,
+  type EvalEvent,
   type NodeStatusEvent,
   type SSEEvent,
   type PlanEvent,
@@ -24,14 +26,24 @@ export type MultiStreamPanelProps = {
   plan: Plan;
   apiBase?: string;
   onStreamEvent?: (ev: SSEEvent) => void;
+  onDowngrade?: (ev: DowngradeEvent) => void;
+  onEval?: (ev: EvalEvent) => void;
   onClose?: () => void;
+  workspace?: string;
+  budget?: { max_cost_usd?: number; max_carbon_g?: number } | null;
+  evalEnabled?: boolean;
 };
 
 export function MultiStreamPanel({
   plan,
   apiBase,
   onStreamEvent,
+  onDowngrade,
+  onEval,
   onClose,
+  workspace,
+  budget,
+  evalEnabled,
 }: MultiStreamPanelProps) {
   const [rows, setRows] = useState<Record<string, StreamRow>>(() => {
     const init: Record<string, StreamRow> = {};
@@ -108,6 +120,9 @@ export function MultiStreamPanel({
         apiBase,
         signal: controller.signal,
         parallelism: 4,
+        workspace,
+        budget: budget ?? undefined,
+        eval: evalEnabled,
       })) {
         onStreamEvent?.(ev);
         switch (ev.event) {
@@ -119,6 +134,12 @@ export function MultiStreamPanel({
             break;
           case "chunk":
             applyChunk(ev.data);
+            break;
+          case "downgrade":
+            onDowngrade?.(ev.data);
+            break;
+          case "eval":
+            onEval?.(ev.data);
             break;
           case "done":
             setDone({ ok: (ev.data as any).ok, cancelled: !!(ev.data as any).cancelled });
