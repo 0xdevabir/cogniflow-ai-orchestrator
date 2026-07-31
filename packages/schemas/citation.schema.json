@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cogniflow.dev/schemas/citation.v1.json",
+  "title": "CitationManifest",
+  "description": "Immutable provenance graph shipped over SSE at end of run.",
+  "type": "object",
+  "required": ["v", "spans"],
+  "properties": {
+    "v":         { "const": "citation.v1" },
+    "spans": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/Span" }
+    }
+  },
+  "$defs": {
+    "Span": {
+      "type": "object",
+      "required": ["id", "sub_task_id", "model", "text"],
+      "properties": {
+        "id":          { "type": "string" },
+        "sub_task_id": { "type": "string" },
+        "model":       { "type": "string" },
+        "text":        { "type": "string" },
+        "doc_id":      { "type": "string" },
+        "doc_snippet": { "type": "string" },
+        "prompt_hash": { "type": "string" },
+        "char_start":  { "type": "integer" },
+        "char_end":    { "type": "integer" }
+      }
+    }
+  }
+}
