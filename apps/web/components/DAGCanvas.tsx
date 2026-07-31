@@ -24,6 +24,10 @@ export type PlanNode = {
   payload: string;
   status: "pending" | "running" | "ok" | "error" | "debating";
   model?: string;
+  score?: number;
+  breakdown?: Record<string, number>;
+  reason?: string;
+  task_class?: string;
   needs_rag?: boolean;
 };
 
@@ -42,8 +46,8 @@ export type DAGCanvasProps = {
 
 // --- layout ---
 
-const NODE_WIDTH = 240;
-const NODE_HEIGHT = 110;
+const NODE_WIDTH = 250;
+const NODE_HEIGHT = 140;
 
 function layoutWithDagre(nodes: Node[], edges: Edge[]): { nodes: Node[]; edges: Edge[] } {
   const g = new dagre.graphlib.Graph();
@@ -87,6 +91,7 @@ function PlanNodeCard({ data }: NodeProps) {
         flexDirection: "column",
         gap: 4,
         boxShadow: "0 1px 2px rgba(0,0,0,0.05)",
+        cursor: "pointer",
       }}
     >
       <Handle type="target" position={Position.Left} style={{ background: "#888" }} />
@@ -130,7 +135,39 @@ function PlanNodeCard({ data }: NodeProps) {
       {p.model && (
         <div style={{ fontSize: "0.7rem", color: "#555", marginTop: "auto" }}>
           🧠 <code style={{ fontSize: "0.7rem" }}>{p.model}</code>
-          {p.needs_rag && <span style={{ marginLeft: 6 }}>📚 RAG</span>}
+          {typeof p.score === "number" && (
+            <span
+              title="Router score"
+              style={{
+                marginLeft: 6,
+                background: "#eef2ff",
+                color: "#4338ca",
+                padding: "1px 6px",
+                borderRadius: 999,
+                fontFamily: "ui-monospace, monospace",
+                fontSize: "0.65rem",
+                fontWeight: 600,
+              }}
+            >
+              {p.score.toFixed(2)}
+            </span>
+          )}
+          {p.task_class && (
+            <span
+              style={{
+                marginLeft: 4,
+                background: "#f4f4f5",
+                color: "#3f3f46",
+                padding: "1px 6px",
+                borderRadius: 999,
+                fontSize: "0.6rem",
+                textTransform: "uppercase",
+              }}
+            >
+              {p.task_class}
+            </span>
+          )}
+          {p.needs_rag && <span style={{ marginLeft: 4 }}>📚</span>}
         </div>
       )}
       <Handle type="source" position={Position.Right} style={{ background: "#888" }} />
