@@ -97,6 +97,7 @@ func main() {
 	mux.HandleFunc("/healthz", srv.HandleHealthz)
 	mux.HandleFunc("/v1/chat", srv.HandleChat)
 	mux.HandleFunc("/v1/plan", srv.HandlePlan)
+	mux.HandleFunc("/v1/run", srv.HandleRun)
 
 	httpServer := &http.Server{
 		Addr:              addr,

@@ -2,8 +2,10 @@
 
 import { useState } from "react";
 import { StreamPanel } from "@/components/StreamPanel";
-import { DAGCanvas, type Plan, type PlanNode } from "@/components/DAGCanvas";
+import { DAGCanvas, type Plan, type PlanNode, type NodeStatus } from "@/components/DAGCanvas";
+import { MultiStreamPanel } from "@/components/MultiStreamPanel";
 import { NodeDetailsPanel, type RoutedNode } from "@/components/NodeDetailsPanel";
+import type { SSEEvent } from "@/lib/sse";
 
 type PlanState =
   | { kind: "idle" }
@@ -19,10 +21,12 @@ type PlanState =
 export default function PlaygroundPage() {
   const [planState, setPlanState] = useState<PlanState>({ kind: "idle" });
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
+  const [runStarted, setRunStarted] = useState(false);
 
   async function showPlan(prompt: string) {
     setPlanState({ kind: "loading" });
     setSelectedNodeId(null);
+    setRunStarted(false);
     try {
       const res = await fetch("/api/proxy/v1/plan", {
         method: "POST",
@@ -36,13 +40,11 @@ export default function PlaygroundPage() {
       }
       const data = await res.json();
 
-      // Index routing decisions by node_id for fast lookup at click time.
       const routed: Record<string, RoutedNode> = {};
       for (const r of data.routed ?? []) {
         routed[r.node_id] = r;
       }
 
-      // Hydrate the orchestrator's snake_case into a Plan object.
       const plan: Plan = {
         version: data.plan?.version ?? "plan.v1",
         nodes: (data.plan?.nodes ?? []).map((n: any): PlanNode => {
@@ -68,6 +70,20 @@ export default function PlaygroundPage() {
     }
   }
 
+  function handleStreamEvent(ev: SSEEvent) {
+    if (ev.event !== "node_status") return;
+    setPlanState((prev) => {
+      if (prev.kind !== "ready") return prev;
+      const updated: Plan = {
+        ...prev.plan,
+        nodes: prev.plan.nodes.map((n) =>
+          n.id === ev.data.node_id ? { ...n, status: ev.data.status as NodeStatus } : n,
+        ),
+      };
+      return { ...prev, plan: updated };
+    });
+  }
+
   const selectedNode =
     planState.kind === "ready" && selectedNodeId
       ? planState.plan.nodes.find((n) => n.id === selectedNodeId) ?? null
@@ -86,16 +102,53 @@ export default function PlaygroundPage() {
     >
       <h1 style={{ marginBottom: 4 }}>🎮 Playground</h1>
       <p style={{ color: "#666", marginTop: 0 }}>
-        Phase 3 — Decompose a prompt into a DAG, route each node to a model, then stream a
-        single-model answer.
+        Phase 4 — Decompose a prompt, route each node to a model, then run the DAG in parallel.
       </p>
 
       <section style={{ marginTop: "1.25rem", marginBottom: "1.5rem" }}>
-        <PlanSection state={planState} onShowPlan={showPlan} onNodeClick={setSelectedNodeId} />
+        <PlanSection
+          state={planState}
+          onShowPlan={showPlan}
+          onNodeClick={setSelectedNodeId}
+        />
       </section>
 
+      {planState.kind === "ready" && runStarted && (
+        <section style={{ marginTop: "1.5rem" }}>
+          <h2 style={{ fontSize: "1.1rem", marginBottom: 8 }}>⚡ Parallel streams</h2>
+          <MultiStreamPanel
+            plan={planState.plan}
+            apiBase="/api/proxy"
+            onStreamEvent={handleStreamEvent}
+            onClose={() => setRunStarted(false)}
+          />
+        </section>
+      )}
+
+      {planState.kind === "ready" && (
+        <section style={{ marginTop: "1.5rem" }}>
+          {!runStarted && (
+            <button
+              onClick={() => setRunStarted(true)}
+              style={{
+                padding: "0.6rem 1.2rem",
+                background: "var(--cf-accent)",
+                color: "#fff",
+                border: "none",
+                borderRadius: 8,
+                cursor: "pointer",
+                fontWeight: 600,
+                fontSize: "0.95rem",
+              }}
+            >
+              ▶ Run Plan
+            </button>
+          )}
+        </section>
+      )}
+
       <section style={{ marginTop: "1.5rem" }}>
-        <h2 style={{ fontSize: "1.1rem", marginBottom: 8 }}>📡 Single-model stream</h2>
+        <h2 style={{ fontSize: "1.1rem", marginBottom: 8 }}>📡 Single-model stream (Phase 1)</h2>
         <StreamPanel
           apiBase="/api/proxy"
           defaultModel="mock"
@@ -104,8 +157,7 @@ export default function PlaygroundPage() {
       </section>
 
       <p style={{ marginTop: "1.5rem", fontSize: "0.85rem", color: "#888" }}>
-        Click a node in the DAG to see the routing breakdown. Phase 4 will add a
-        <strong> Run</strong> button that executes the routed plan in parallel.
+        Phase 5 will replace the synthesizer with a true citation-aware fusion engine.
       </p>
 
       <p>
@@ -138,7 +190,7 @@ function PlanSection({
 
   return (
     <div>
-      <h2 style={{ fontSize: "1.1rem", marginBottom: 8 }}>🧩 Plan + Router (Phase 3)</h2>
+      <h2 style={{ fontSize: "1.1rem", marginBottom: 8 }}>🧩 Plan + Router</h2>
 
       <textarea
         value={prompt}

@@ -18,17 +18,21 @@ import "@xyflow/react/dist/style.css";
 
 // --- types ---
 
+export type NodeStatus = "pending" | "running" | "ok" | "error" | "debating";
+
 export type PlanNode = {
   id: string;
   role: string;
   payload: string;
-  status: "pending" | "running" | "ok" | "error" | "debating";
+  status: NodeStatus;
   model?: string;
   score?: number;
   breakdown?: Record<string, number>;
   reason?: string;
   task_class?: string;
   needs_rag?: boolean;
+  // Optional: live token preview of this node's stream.
+  preview?: string;
 };
 
 export type PlanEdge = { from: string; to: string };
@@ -46,8 +50,8 @@ export type DAGCanvasProps = {
 
 // --- layout ---
 
-const NODE_WIDTH = 250;
-const NODE_HEIGHT = 140;
+const NODE_WIDTH = 260;
+const NODE_HEIGHT = 160;
 
 function layoutWithDagre(nodes: Node[], edges: Edge[]): { nodes: Node[]; edges: Edge[] } {
   const g = new dagre.graphlib.Graph();
@@ -77,14 +81,15 @@ function layoutWithDagre(nodes: Node[], edges: Edge[]): { nodes: Node[]; edges: 
 function PlanNodeCard({ data }: NodeProps) {
   const d = data as { plan: PlanNode };
   const p = d.plan;
+  const c = statusColor(p.status);
 
   return (
     <div
       style={{
         width: NODE_WIDTH,
         height: NODE_HEIGHT,
-        background: statusColor(p.status).bg,
-        border: `2px solid ${statusColor(p.status).border}`,
+        background: c.bg,
+        border: `2px solid ${c.border}`,
         borderRadius: 10,
         padding: "10px 12px",
         display: "flex",
@@ -92,6 +97,7 @@ function PlanNodeCard({ data }: NodeProps) {
         gap: 4,
         boxShadow: "0 1px 2px rgba(0,0,0,0.05)",
         cursor: "pointer",
+        animation: p.status === "running" ? "pulse 1.6s ease-in-out infinite" : undefined,
       }}
     >
       <Handle type="target" position={Position.Left} style={{ background: "#888" }} />
@@ -110,8 +116,8 @@ function PlanNodeCard({ data }: NodeProps) {
             textTransform: "uppercase",
             padding: "2px 6px",
             borderRadius: 999,
-            background: statusColor(p.status).pill,
-            color: statusColor(p.status).pillFg,
+            background: c.pill,
+            color: c.pillFg,
             fontWeight: 700,
             letterSpacing: 0.4,
           }}
@@ -132,6 +138,26 @@ function PlanNodeCard({ data }: NodeProps) {
       >
         {p.payload}
       </div>
+      {p.preview && (
+        <div
+          style={{
+            fontSize: "0.7rem",
+            color: "#444",
+            background: "rgba(255,255,255,0.6)",
+            border: "1px dashed #cbd5e1",
+            borderRadius: 4,
+            padding: "2px 5px",
+            marginTop: 2,
+            maxHeight: 32,
+            overflow: "hidden",
+            textOverflow: "ellipsis",
+            whiteSpace: "nowrap",
+          }}
+          title={p.preview}
+        >
+          {p.preview}
+        </div>
+      )}
       {p.model && (
         <div style={{ fontSize: "0.7rem", color: "#555", marginTop: "auto" }}>
           🧠 <code style={{ fontSize: "0.7rem" }}>{p.model}</code>
@@ -177,7 +203,7 @@ function PlanNodeCard({ data }: NodeProps) {
 
 const nodeTypes = { planNode: PlanNodeCard };
 
-function statusColor(s: PlanNode["status"]): {
+function statusColor(s: NodeStatus): {
   bg: string;
   border: string;
   pill: string;
@@ -207,15 +233,23 @@ export function DAGCanvas({ plan, onNodeClick }: DAGCanvasProps) {
       data: { plan: n },
       position: { x: 0, y: 0 },
     }));
-    const initialEdges: Edge[] = plan.edges.map((e, i) => ({
-      id: `e${i}`,
-      source: e.from,
-      target: e.to,
-      type: "smoothstep",
-      animated: plan.nodes.find((n) => n.id === e.from)?.status === "ok",
-      markerEnd: { type: MarkerType.ArrowClosed },
-      style: { stroke: "#94a3b8", strokeWidth: 1.6 },
-    }));
+    const initialEdges: Edge[] = plan.edges.map((e, i) => {
+      const from = plan.nodes.find((n) => n.id === e.from);
+      const to = plan.nodes.find((n) => n.id === e.to);
+      const bothDone = from?.status === "ok" && to?.status === "ok";
+      return {
+        id: `e${i}`,
+        source: e.from,
+        target: e.to,
+        type: "smoothstep",
+        animated: from?.status === "running" || from?.status === "ok",
+        markerEnd: { type: MarkerType.ArrowClosed },
+        style: {
+          stroke: bothDone ? "#22c55e" : from?.status === "ok" ? "#60a5fa" : "#94a3b8",
+          strokeWidth: bothDone ? 2.2 : 1.6,
+        },
+      };
+    });
     return layoutWithDagre(initialNodes, initialEdges);
   }, [plan]);
 
@@ -223,12 +257,14 @@ export function DAGCanvas({ plan, onNodeClick }: DAGCanvasProps) {
     <div
       style={{
         width: "100%",
-        height: 460,
+        height: 480,
         border: "1px solid var(--cf-border)",
         borderRadius: 12,
         background: "#fff",
+        position: "relative",
       }}
     >
+      <style>{`@keyframes pulse { 0%,100% { box-shadow: 0 0 0 0 rgba(59,130,246,0.4); } 50% { box-shadow: 0 0 0 6px rgba(59,130,246,0.0); } }`}</style>
       <ReactFlowProvider>
         <ReactFlow
           nodes={nodes}
