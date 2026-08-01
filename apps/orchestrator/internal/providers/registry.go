@@ -32,6 +32,7 @@ func NewRegistry(cfg *RegistryConfig) Registry {
 			"mistral":   "mistral-small-latest",
 			"hf":        "meta-llama/Meta-Llama-3-8B-Instruct",
 			"ollama":    "llama3.1",
+			"groq":      "llama-3.1-70b-versatile",
 			"mock":      "echo-v1",
 		},
 	}
@@ -60,6 +61,11 @@ func NewRegistry(cfg *RegistryConfig) Registry {
 	}
 	if cfg.OllamaURL != "" {
 		r.streamers["ollama"] = newOllamaStub(cfg.OllamaURL)
+	}
+	if cfg.GroqKey != "" {
+		if s, err := newGroq(cfg.GroqKey, cfg.HTTPTimeout); err == nil {
+			r.streamers["groq"] = s
+		}
 	}
 
 	return r
@@ -121,6 +127,8 @@ func DefaultModel(prefix string) string {
 		return "meta-llama/Meta-Llama-3-8B-Instruct"
 	case "ollama":
 		return "llama3.1"
+	case "groq":
+		return "llama-3.1-70b-versatile"
 	case "mock", "":
 		return "echo-v1"
 	default:

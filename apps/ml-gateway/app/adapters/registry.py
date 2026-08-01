@@ -7,6 +7,7 @@ from typing import Callable, AsyncIterator, TYPE_CHECKING
 
 from . import openai as openai_adapter
 from . import anthropic as anthropic_adapter
+from . import groq as groq_adapter
 
 if TYPE_CHECKING:
     from .base import ProviderRequest, ProviderChunk
@@ -18,6 +19,7 @@ ProviderFn = Callable[["ProviderRequest"], AsyncIterator["ProviderChunk"]]
 _REGISTRY: dict[str, ProviderFn] = {
     "openai": openai_adapter.stream,
     "anthropic": anthropic_adapter.stream,
+    "groq": groq_adapter.stream,
     "mock": openai_adapter.stream,  # mock routes to the same fallback stream
 }
 
@@ -45,4 +47,6 @@ def list_names() -> list[str]:
         out.append("hf")
     if os.getenv("OLLAMA_BASE_URL"):
         out.append("ollama")
+    if os.getenv("GROQ_API_KEY"):
+        out.append("groq")
     return sorted(set(out))

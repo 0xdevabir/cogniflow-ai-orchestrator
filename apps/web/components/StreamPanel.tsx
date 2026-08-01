@@ -13,13 +13,18 @@ type ModelOption = {
   label: string;
 };
 
-const MODEL_OPTIONS: ModelOption[] = [
-  { value: "openai:gpt-4o-mini", label: "OpenAI · GPT-4o mini (cheap)" },
-  { value: "openai:gpt-4o", label: "OpenAI · GPT-4o (vision)" },
-  { value: "anthropic:claude-3-5-sonnet-latest", label: "Anthropic · Claude 3.5 Sonnet" },
-  { value: "anthropic:claude-3-haiku-20240307", label: "Anthropic · Claude 3 Haiku (cheap)" },
-  { value: "mock", label: "Mock (no API key needed)" },
+// Static fallback list — used only when the orchestrator is unreachable.
+// When the orchestrator is up, the dropdown is populated dynamically from
+// /v1/models so users only see providers that are actually wired.
+const FALLBACK_MODEL_OPTIONS: ModelOption[] = [
+  { value: "mock:echo-v1", label: "🧪 Mock (no API key needed)" },
 ];
+
+type ProviderInfo = {
+  name: string;
+  default_model: string;
+  default_label: string;
+};
 
 export type StreamPanelProps = {
   apiBase?: string;
@@ -29,7 +34,7 @@ export type StreamPanelProps = {
 
 export function StreamPanel({
   apiBase,
-  defaultModel = "openai:gpt-4o-mini",
+  defaultModel = "mock:echo-v1",
   initialPrompt = "Explain CAP theorem in 3 sentences.",
 }: StreamPanelProps) {
   const [prompt, setPrompt] = useState(initialPrompt);
@@ -37,12 +42,57 @@ export function StreamPanel({
   const [text, setText] = useState("");
   const [status, setStatus] = useState<"idle" | "running" | "ok" | "error">("idle");
   const [nodeStatus, setNodeStatus] = useState<NodeStatusEvent | null>(null);
+  // Actual model that produced chunks — may differ from the requested model
+  // when no API key is set and the orchestrator falls back to mock.
+  const [respondedModel, setRespondedModel] = useState<string | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [chars, setChars] = useState(0);
   const [latencyMs, setLatencyMs] = useState(0);
   const [startedAt, setStartedAt] = useState<number | null>(null);
+  // Dynamic dropdown options sourced from /v1/models; falls back to mock only
+  // when the orchestrator is unreachable.
+  const [modelOptions, setModelOptions] = useState<ModelOption[]>(FALLBACK_MODEL_OPTIONS);
+  const [optionsSource, setOptionsSource] = useState<"loading" | "live" | "fallback">("loading");
 
   const controllerRef = useRef<AbortController | null>(null);
+
+  // Fetch the registered providers from the orchestrator and rebuild the
+  // dropdown to show only those. Runs once on mount.
+  useEffect(() => {
+    const base = apiBase ?? "/api";
+    fetch(`${base}/v1/models`)
+      .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
+      .then((data: { providers: ProviderInfo[] }) => {
+        const opts: ModelOption[] = (data.providers ?? [])
+          .map((p) => ({ value: p.default_model, label: p.default_label }))
+          // Put mock first if present (always shown for dev), then the rest
+          // in the order the orchestrator returned.
+          .sort((a, b) => {
+            const aMock = a.value.startsWith("mock:") ? -1 : 0;
+            const bMock = b.value.startsWith("mock:") ? -1 : 0;
+            return aMock - bMock;
+          });
+        if (opts.length > 0) {
+          setModelOptions(opts);
+          setOptionsSource("live");
+          // If the currently selected model isn't in the live list, switch
+          // to the orchestrator's first available option.
+          if (!opts.some((o) => o.value === model)) {
+            setModel(opts[0].value);
+          }
+        } else {
+          setOptionsSource("fallback");
+        }
+      })
+      .catch(() => {
+        // Orchestrator down or /v1/models not available — fall back to mock.
+        setModelOptions(FALLBACK_MODEL_OPTIONS);
+        setOptionsSource("fallback");
+      });
+    // We deliberately only run on mount; we don't want to clobber the user's
+    // selection while they're mid-conversation.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   useEffect(() => {
     // Tick a 100ms timer while running so latency feels alive.
@@ -61,6 +111,7 @@ export function StreamPanel({
     setLatencyMs(0);
     setStatus("running");
     setNodeStatus(null);
+    setRespondedModel(null);
     const started = Date.now();
     setStartedAt(started);
 
@@ -96,6 +147,10 @@ export function StreamPanel({
       case "chunk":
         setText((prev) => prev + ev.data.text);
         setChars((n) => n + ev.data.text.length);
+        // Capture the actual responding model from the first chunk.
+        if (!respondedModel && ev.data.model) {
+          setRespondedModel(ev.data.model);
+        }
         break;
       case "done":
         setStatus("ok");
@@ -139,11 +194,36 @@ export function StreamPanel({
         >
           {status.toUpperCase()}
         </span>
-        {nodeStatus?.model && (
-          <span style={{ fontSize: "0.85rem", color: "#666" }}>
-            model: <code>{nodeStatus.model}</code>
-          </span>
-        )}
+        {/* Show the actual responding model. For single-chat, this comes
+            from the first chunk; for multi-node, it comes from node_status. */}
+        {(() => {
+          const actual = respondedModel ?? nodeStatus?.model;
+          if (!actual) return null;
+          const requested = model;
+          const fellBack = actual !== requested && actual.startsWith("mock:");
+          return (
+            <span style={{ fontSize: "0.85rem", color: "#666" }}>
+              model: <code>{actual}</code>
+              {fellBack && (
+                <span
+                  title="No API key for the requested provider — fell back to mock."
+                  style={{
+                    marginLeft: 6,
+                    padding: "1px 6px",
+                    borderRadius: 4,
+                    background: "#fef3c7",
+                    color: "#92400e",
+                    fontSize: "0.7rem",
+                    border: "1px solid #fcd34d",
+                    cursor: "help",
+                  }}
+                >
+                  fallback
+                </span>
+              )}
+            </span>
+          );
+        })()}
         {status === "running" && (
           <span style={{ marginLeft: "auto", fontSize: "0.85rem", color: "#666" }}>
             {(latencyMs / 1000).toFixed(1)}s · {chars} chars
@@ -221,14 +301,31 @@ export function StreamPanel({
               borderRadius: 8,
               fontSize: "0.9rem",
               background: "#fff",
+              maxWidth: 320,
             }}
           >
-            {MODEL_OPTIONS.map((o) => (
+            {modelOptions.map((o) => (
               <option key={o.value} value={o.value}>
                 {o.label}
               </option>
             ))}
           </select>
+          {optionsSource === "fallback" && (
+            <span
+              title="Orchestrator unreachable — only mock is available."
+              style={{ fontSize: "0.72rem", color: "#92400e" }}
+            >
+              ⚠ orchestrator offline
+            </span>
+          )}
+          {optionsSource === "live" && (
+            <span
+              title="Showing providers the orchestrator has registered."
+              style={{ fontSize: "0.72rem", color: "#166534" }}
+            >
+              ✓ {modelOptions.length} provider{modelOptions.length === 1 ? "" : "s"}
+            </span>
+          )}
           {status !== "running" ? (
             <button
               onClick={handleSend}

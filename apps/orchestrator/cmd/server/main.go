@@ -56,6 +56,7 @@ func main() {
 		MistralKey:   os.Getenv("MISTRAL_API_KEY"),
 		HFKey:        os.Getenv("HF_API_KEY"),
 		OllamaURL:    os.Getenv("OLLAMA_BASE_URL"),
+		GroqKey:      os.Getenv("GROQ_API_KEY"),
 		HTTPTimeout:  60,
 	})
 
@@ -161,6 +162,7 @@ func main() {
 	mux.HandleFunc("/v1/chat", srv.HandleChat)
 	mux.HandleFunc("/v1/plan", srv.HandlePlan)
 	mux.HandleFunc("/v1/run", srv.HandleRun)
+	mux.HandleFunc("/v1/models", srv.HandleModels)
 	mux.HandleFunc("/v1/docs", srv.HandleDocsRoute)
 	mux.HandleFunc("/v1/docs/", srv.HandleDocsRoute)
 

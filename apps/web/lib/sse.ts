@@ -166,25 +166,42 @@ export async function* streamChat(
   const apiBase = opts.apiBase ?? "/api";
   const model = opts.model ?? "openai:gpt-4o-mini";
 
-  const url = `${apiBase}/chat`;
-  const res = await fetch(url, {
-    method: "POST",
-    headers: {
-      "content-type": "application/json",
-      accept: "text/event-stream",
-    },
-    body: JSON.stringify({
-      prompt,
-      model,
-      conversation_id: opts.conversationId,
-    }),
-    signal: opts.signal,
-  });
-
-  if (!res.ok) {
+  const url = `${apiBase}/v1/chat`;
+  let res: Response;
+  try {
+    res = await fetch(url, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        accept: "text/event-stream",
+      },
+      body: JSON.stringify({
+        prompt,
+        model,
+        conversation_id: opts.conversationId,
+      }),
+      signal: opts.signal,
+    });
+  } catch (e: any) {
+    // Network / connection error — the orchestrator is probably down.
     yield {
       event: "error",
-      data: { message: `HTTP ${res.status}: ${res.statusText}`, code: "http_error" },
+      data: {
+        message: `Can't reach orchestrator at ${apiBase}. Is it running on :8080?`,
+        code: "network_error",
+      },
+    };
+    return;
+  }
+
+  if (!res.ok) {
+    const bodyText = await res.text().catch(() => "");
+    yield {
+      event: "error",
+      data: {
+        message: `HTTP ${res.status}: ${res.statusText}${bodyText ? ` — ${bodyText.slice(0, 200)}` : ""}`,
+        code: "http_error",
+      },
     };
     return;
   }
@@ -199,7 +216,7 @@ export async function* streamRun(
 ): AsyncGenerator<SSEEvent> {
   const apiBase = opts.apiBase ?? "/api";
 
-  const url = `${apiBase}/run`;
+  const url = `${apiBase}/v1/run`;
   const body: Record<string, any> = {
     plan,
     parallelism: opts.parallelism ?? 4,

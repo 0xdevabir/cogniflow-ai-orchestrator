@@ -10,6 +10,9 @@
     "mistral:mistral-small-latest": 0.20,
     "ollama:llama3.1:70b": 0.00,
     "ollama:llama3.1:8b": 0.00,
+    "groq:llama-3.1-70b-versatile": 0.59,
+    "groq:llama-3.1-8b-instant": 0.05,
+    "groq:mixtral-8x7b-32768": 0.27,
     "mock:echo-v1": 0.00
   },
   "per_million_output_usd": {
@@ -22,6 +25,9 @@
     "mistral:mistral-small-latest": 0.60,
     "ollama:llama3.1:70b": 0.00,
     "ollama:llama3.1:8b": 0.00,
+    "groq:llama-3.1-70b-versatile": 0.79,
+    "groq:llama-3.1-8b-instant": 0.08,
+    "groq:mixtral-8x7b-32768": 0.27,
     "mock:echo-v1": 0.00
   },
   "latency_p95_ms": {
@@ -34,6 +40,9 @@
     "mistral:mistral-small-latest": 800,
     "ollama:llama3.1:70b": 6000,
     "ollama:llama3.1:8b": 1500,
+    "groq:llama-3.1-70b-versatile": 400,
+    "groq:llama-3.1-8b-instant": 200,
+    "groq:mixtral-8x7b-32768": 500,
     "mock:echo-v1": 100
   },
   "carbon_g_per_million_tokens": {
@@ -46,6 +55,9 @@
     "mistral:mistral-small-latest": 0.30,
     "ollama:llama3.1:70b": 0.05,
     "ollama:llama3.1:8b": 0.01,
+    "groq:llama-3.1-70b-versatile": 0.20,
+    "groq:llama-3.1-8b-instant": 0.02,
+    "groq:mixtral-8x7b-32768": 0.15,
     "mock:echo-v1": 0.00
   }
 }
