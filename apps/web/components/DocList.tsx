@@ -28,7 +28,7 @@ export function DocList({ apiBase = "/api/proxy", workspace = "default", refresh
     setLoading(true);
     setError(null);
     try {
-      const res = await fetch(`${apiBase}/docs?workspace=${encodeURIComponent(workspace)}`);
+      const res = await fetch(`${apiBase}/v1/docs?workspace=${encodeURIComponent(workspace)}`);
       if (!res.ok) {
         throw new Error(`HTTP ${res.status}: ${await res.text()}`);
       }
@@ -49,7 +49,7 @@ export function DocList({ apiBase = "/api/proxy", workspace = "default", refresh
   async function deleteDoc(id: string) {
     if (!confirm("Delete this document and its chunks?")) return;
     try {
-      const res = await fetch(`${apiBase}/docs/${id}`, { method: "DELETE" });
+      const res = await fetch(`${apiBase}/v1/docs/${id}`, { method: "DELETE" });
       if (!res.ok) {
         throw new Error(`HTTP ${res.status}: ${await res.text()}`);
       }

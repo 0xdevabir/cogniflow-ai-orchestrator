@@ -18,7 +18,7 @@ import (
 
 // ModelID is the fully-qualified model id we route on.
 type ModelID struct {
-	Provider string // "openai" | "anthropic" | "mock" | "ollama" | "mistral" | "hf"
+	Provider string // "openai" | "anthropic" | "mock" | "ollama" | "mistral" | "hf" | "groq"
 	Model    string // "gpt-4o-mini" etc.
 }
 

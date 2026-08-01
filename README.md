@@ -148,6 +148,7 @@ Every `/v1/run` `done` event includes `trace_id` and `span_id` so a recruiter ca
 | `MISTRAL_API_KEY` | — | Adapter stub; ready for Phase 8+ |
 | `HF_API_KEY` | — | Hugging Face adapter stub |
 | `OLLAMA_BASE_URL` | — | Local model endpoint |
+| `GROQ_API_KEY` | — | Enables Groq adapter (OpenAI-compatible; Llama 3.1, Mixtral, etc.) |
 | `DECOMP_MODEL` | `openai:gpt-4o-mini` | Decomposer model (any `provider:model`) |
 | `BANDIT_LOG` | `./data/bandit.jsonl` | Where routing + feedback events are appended |
 | `ROUTER_RECOMMENDATION` | — | Path to JSON output of `bandit-learn`; applied on boot |

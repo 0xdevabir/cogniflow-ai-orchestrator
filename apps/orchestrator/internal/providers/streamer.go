@@ -85,6 +85,7 @@ type RegistryConfig struct {
 	MistralKey   string
 	HFKey        string
 	OllamaURL    string
+	GroqKey      string
 	HTTPTimeout  int // seconds; default 60
 }
 

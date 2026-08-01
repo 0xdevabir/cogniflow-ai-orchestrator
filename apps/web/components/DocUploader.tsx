@@ -31,7 +31,7 @@ export function DocUploader({
         form.append("workspace", workspace);
         form.append("title", file.name);
         setProgress(35);
-        const res = await fetch(`${apiBase}/docs`, {
+        const res = await fetch(`${apiBase}/v1/docs`, {
           method: "POST",
           body: form,
         });

@@ -86,6 +86,7 @@ secrets:
   mistralApiKey: ""
   hfApiKey: ""
   ollamaBaseUrl: ""
+  groqApiKey: ""
   stripeApiKey: ""
   stripeMeterId: ""
 
