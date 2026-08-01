@@ -43,6 +43,12 @@ type Executor struct {
 	Judge       *eval.Judge        // optional; if set, runs after the run completes
 	Meter       meter.Meterer      // optional; if set, per-node usage events are recorded for billing
 	RunID       string             // optional; surfaced on every usage event so a run is traceable end-to-end
+	// Prompt is the original user prompt; written into the eval log so the
+	// dashboard can show what each run was about.
+	Prompt      string
+	// EvalLog persists every eval.Result to disk so the dashboard can show
+	// historical runs. Optional; nil disables persistence.
+	EvalLog     *eval.JSONLEvalLogger
 	Parallelism int                // default 4
 
 	// Populated by Run after a budget cascade.
@@ -651,6 +657,10 @@ func (e *Executor) runEval(ctx context.Context, outs *sync.Map, startedAt time.T
 		return
 	}
 	_ = e.Sink.Emit("eval", res)
+	if e.EvalLog != nil {
+		// Best-effort: logging failures must not break the run.
+		e.EvalLog.Record(res, e.RunID, e.Prompt, e.WorkspaceID, startedAt, endedAt)
+	}
 }
 
 // runFusion packages the per-node outputs into a FusionRequest, invokes the

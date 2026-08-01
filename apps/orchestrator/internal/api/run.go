@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"net/http"
+	"strings"
 	"sync"
 
 	"github.com/cogniflow/orchestrator/internal/budget"
@@ -26,6 +27,8 @@ type runRequest struct {
 	// Plan is the explicit DAG to run. Optional.
 	Plan *decomposer.Plan `json:"plan,omitempty"`
 	// Prompt + Model trigger the decompose-then-run path. Optional.
+	// When Plan is supplied, Prompt is also surfaced so the eval log can
+	// record what the user actually asked.
 	Prompt string `json:"prompt,omitempty"`
 	Model  string `json:"model,omitempty"`
 	// ExecutorMode overrides the global default; "local" or "temporal".
@@ -181,6 +184,16 @@ func (s *Server) HandleRun(w http.ResponseWriter, r *http.Request) {
 	// trace id + user request.
 	executor.Meter = s.Meter
 	executor.RunID = newRunID()
+	// Phase 7+: persist the original prompt + workspace so the eval log
+	// (and downstream dashboard) can correlate the run with its input.
+	if req.Prompt != "" {
+		executor.Prompt = req.Prompt
+	} else if req.Plan != nil {
+		// Best-effort fallback when the web client sends a Plan without
+		// echoing the original prompt (older versions).
+		executor.Prompt = firstUserPayload(req.Plan)
+	}
+	executor.EvalLog = s.EvalLog
 
 	// Use a child context we can cancel cleanly if the client disconnects.
 	ctx, cancel := context.WithCancel(r.Context())
@@ -219,6 +232,28 @@ func newRunID() string {
 		return "run-static"
 	}
 	return "run-" + hex.EncodeToString(b[:])
+}
+
+// firstUserPayload picks a representative node payload from the plan as a
+// best-effort fallback when the web client sends a Plan without echoing the
+// original prompt (older versions). Returns empty string when no suitable
+// node exists.
+func firstUserPayload(p *decomposer.Plan) string {
+	if p == nil {
+		return ""
+	}
+	for _, n := range p.Nodes {
+		if n.Role == decomposer.RoleSynthesizer {
+			continue
+		}
+		if s := strings.TrimSpace(n.Payload); s != "" {
+			if len(s) > 200 {
+				s = s[:200] + "…"
+			}
+			return s
+		}
+	}
+	return ""
 }
 
 // ensure unused-import lint doesn't trip when Meter wiring moves around.

@@ -20,6 +20,7 @@ import (
 	"github.com/cogniflow/orchestrator/internal/api"
 	"github.com/cogniflow/orchestrator/internal/decomposer"
 	"github.com/cogniflow/orchestrator/internal/entity"
+	"github.com/cogniflow/orchestrator/internal/eval"
 	"github.com/cogniflow/orchestrator/internal/meter"
 	"github.com/cogniflow/orchestrator/internal/obs"
 	"github.com/cogniflow/orchestrator/internal/providers"
@@ -129,6 +130,35 @@ func main() {
 		EntityStore: entity.NoopStore{},
 	}
 
+	// Phase 8: per-usage-event JSONL log. Defaults to ./data/meter.jsonl
+	// when METER_LOG is unset so the dashboard always has data to show.
+	meterLogPath := os.Getenv("METER_LOG")
+	if meterLogPath == "" {
+		meterLogPath = "./data/meter.jsonl"
+	}
+	if m, err := meter.NewJSONLMeterer(meterLogPath); err == nil {
+		srv.Meter = m
+		log.Printf("📊 meter log → %s", meterLogPath)
+		defer m.Close()
+	} else {
+		log.Printf("meter: failed to open log %s: %v (using noop)", meterLogPath, err)
+		srv.Meter = meter.NoopMeterer{}
+	}
+
+	// Phase 7+: per-run eval-result JSONL log so the /dashboard endpoint can
+	// show historical runs. Defaults to ./data/eval.jsonl when EVAL_LOG unset.
+	evalLogPath := os.Getenv("EVAL_LOG")
+	if evalLogPath == "" {
+		evalLogPath = "./data/eval.jsonl"
+	}
+	if e, err := eval.NewJSONLEvalLogger(evalLogPath); err == nil {
+		srv.EvalLog = e
+		log.Printf("📊 eval log → %s", evalLogPath)
+		defer e.Close()
+	} else {
+		log.Printf("eval: failed to open log %s: %v (eval persistence disabled)", evalLogPath, err)
+	}
+
 	// Phase 7: load the cost table so the budget cascade + eval can price runs.
 	if costs, err := router.LoadCostTable(); err == nil {
 		srv.CostTable = costs
@@ -151,11 +181,15 @@ func main() {
 	srv.RAG = ragSvc
 
 	// Build the meter. Order of preference:
-	//   1. STRIPE_API_KEY + STRIPE_METER_ID → StripeMeterer
-	//   2. METER_LOG path                     → JSONLMeterer
-	//   3. nothing configured                 → NoopMeterer (dev default)
-	meterer := buildMeter()
-	srv.Meter = meterer
+	// Build the meter. The JSONL default was wired above so the dashboard
+	// always has data; here we only override when Stripe is explicitly
+	// configured (STRIPE_API_KEY + STRIPE_METER_ID).
+	if sm := meter.StripeMetererFromEnv(); sm != nil {
+		if _, ok := sm.(meter.NoopMeterer); !ok {
+			log.Printf("meter: Stripe enabled (overriding JSONL default)")
+			srv.Meter = sm
+		}
+	}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", srv.HandleHealthz)
@@ -163,6 +197,9 @@ func main() {
 	mux.HandleFunc("/v1/plan", srv.HandlePlan)
 	mux.HandleFunc("/v1/run", srv.HandleRun)
 	mux.HandleFunc("/v1/models", srv.HandleModels)
+	mux.HandleFunc("/v1/dashboard/runs", srv.HandleDashboardRuns)
+	mux.HandleFunc("/v1/dashboard/bandit", srv.HandleDashboardBandit)
+	mux.HandleFunc("/v1/dashboard/models", srv.HandleDashboardModels)
 	mux.HandleFunc("/v1/docs", srv.HandleDocsRoute)
 	mux.HandleFunc("/v1/docs/", srv.HandleDocsRoute)
 
@@ -190,23 +227,3 @@ func main() {
 	_ = httpServer.Shutdown(ctx)
 }
 
-// buildMeter picks the right Meterer implementation based on env vars.
-// Order: Stripe (if keys set) > JSONL log file > NoopMeterer.
-func buildMeter() meter.Meterer {
-	if m := meter.StripeMetererFromEnv(); m != nil {
-		if _, ok := m.(meter.NoopMeterer); !ok {
-			log.Printf("meter: Stripe enabled")
-			return m
-		}
-	}
-	if logPath := os.Getenv("METER_LOG"); logPath != "" {
-		jl, err := meter.NewJSONLMeterer(logPath)
-		if err != nil {
-			log.Printf("meter: failed to open log %s: %v", logPath, err)
-		} else {
-			log.Printf("meter: JSONL log → %s", logPath)
-			return jl
-		}
-	}
-	return meter.NoopMeterer{}
-}
